@@ -100,6 +100,7 @@ endif
 	./coretest "$(TEST_FILE)" 1
 	./coretest "$(TEST_FILE)" 2
 	./coretest "$(TEST_FILE)" 3
+	./coretest "$(TEST_FILE)" 4
 	@echo "== coretest dump-mode error handling =="
 	sh tests/dumperr.sh ./coretest "$(TEST_FILE)"
 	@echo "== plugin (mock VapourSynth host) =="

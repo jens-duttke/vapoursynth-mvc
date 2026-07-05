@@ -27,6 +27,7 @@ static int parse_layout(const char *s) {
 	if (!strcasecmp(s, "right") || !strcasecmp(s, "r")) return MVC_RIGHT;
 	if (!strcasecmp(s, "tab") || !strcasecmp(s, "tb") || !strcasecmp(s, "topbottom")) return MVC_TAB;
 	if (!strcasecmp(s, "sbs") || !strcasecmp(s, "lr") || !strcasecmp(s, "sidebyside")) return MVC_SBS;
+	if (!strcasecmp(s, "alt") || !strcasecmp(s, "alternate") || !strcasecmp(s, "alternating")) return MVC_ALT;
 	return -1; /* unknown */
 }
 
@@ -71,7 +72,7 @@ static void VS_CC vs_source_create(const VSMap *in, VSMap *out, void *userData,
 	int layout = parse_layout(e ? NULL : stack);
 	if (layout < 0) {
 		char buf[128];
-		snprintf(buf, sizeof buf, "mvc.Source: unknown stack mode '%s' (use base/right/tab/sbs)", stack);
+		snprintf(buf, sizeof buf, "mvc.Source: unknown stack mode '%s' (use base/right/tab/sbs/alt)", stack);
 		vsapi->mapSetError(out, buf);
 		return;
 	}

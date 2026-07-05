@@ -395,6 +395,48 @@ done:
 	free_node(b); free_node(r); free_node(t);
 }
 
+/* MVC_ALT interleaves the two views into one clip: 2x the frames at 2x the rate,
+ * with output frame 2k == base frame k and 2k+1 == right frame k. On a 2D stream
+ * alt degrades to base (no doubling). Detect MVC via the tab layout stacking to 2x. */
+static void test_alt(const char *path, int *fail) {
+	char err[512];
+	VSNode *b = call_source(path, "base", err, sizeof err);
+	VSNode *r = call_source(path, "right", err, sizeof err);
+	VSNode *t = call_source(path, "tab", err, sizeof err);
+	VSNode *a = call_source(path, "alt", err, sizeof err);
+	if (!b || !r || !t || !a) { printf("FAIL[alt]: could not open base/right/tab/alt: %s\n", err); *fail = 1; goto done; }
+	const VSVideoInfo *vib = mock_getVideoInfo(b), *vit = mock_getVideoInfo(t), *via = mock_getVideoInfo(a);
+	if (vit->height != 2 * vib->height) { /* 2D stream: alt falls back to base */
+		if (via->numFrames != vib->numFrames || via->fpsNum != vib->fpsNum || via->fpsDen != vib->fpsDen) {
+			printf("FAIL[alt]: 2D alt should match base (frames %d vs %d)\n", via->numFrames, vib->numFrames); *fail = 1;
+		} else printf("ok[alt]: 2D stream, alt falls back to base\n");
+		goto done;
+	}
+	int bad = 0;
+	if (via->numFrames != 2 * vib->numFrames) {
+		printf("FAIL[alt]: alt frames %d != 2x base %d\n", via->numFrames, vib->numFrames); bad = 1;
+	}
+	if (via->fpsNum != 2 * vib->fpsNum || via->fpsDen != vib->fpsDen) {
+		printf("FAIL[alt]: alt fps %lld/%lld != 2x base %lld/%lld\n",
+			(long long)via->fpsNum, (long long)via->fpsDen, (long long)vib->fpsNum, (long long)vib->fpsDen); bad = 1;
+	}
+	if (via->width != vib->width || via->height != vib->height) {
+		printf("FAIL[alt]: alt dims %dx%d != base %dx%d\n", via->width, via->height, vib->width, vib->height); bad = 1;
+	}
+	uint64_t b0 = 0, b1 = 0, r0 = 0, a0 = 0, a1 = 0, a2 = 0;
+	if (frameN_hash(b, 0, &b0) || frameN_hash(b, 1, &b1) || frameN_hash(r, 0, &r0) ||
+	    frameN_hash(a, 0, &a0) || frameN_hash(a, 1, &a1) || frameN_hash(a, 2, &a2)) {
+		printf("FAIL[alt]: getFrame failed\n"); bad = 1;
+	} else {
+		if (a0 != b0) { printf("FAIL[alt]: alt frame 0 != base frame 0\n"); bad = 1; }
+		if (a1 != r0) { printf("FAIL[alt]: alt frame 1 != right frame 0\n"); bad = 1; }
+		if (a2 != b1) { printf("FAIL[alt]: alt frame 2 != base frame 1\n"); bad = 1; }
+	}
+	if (bad) *fail = 1; else printf("ok[alt]: interleaved base/right, 2x frames at 2x rate\n");
+done:
+	free_node(b); free_node(r); free_node(t); free_node(a);
+}
+
 /* swaplr swaps the two views in every layout. On an MVC stream base+swaplr must
  * equal right and right+swaplr must equal base; on a 2D stream (no dependent
  * view) swaplr is a no-op. */
@@ -436,7 +478,7 @@ static void test_bad_stack(const char *path, int *fail) {
 		if (n) { printf("FAIL[stack]: '%s' accepted (want error)\n", bad[i]); *fail = 1; free_node(n); }
 		else printf("ok[stack]: '%s' rejected: %s\n", bad[i], err);
 	}
-	const char *good[] = { "base", "left", "right", "tab", "sbs" };
+	const char *good[] = { "base", "left", "right", "tab", "sbs", "alt" };
 	for (unsigned i = 0; i < sizeof good / sizeof *good; i++) {
 		VSNode *n = call_source(path, good[i], err, sizeof err);
 		if (!n) { printf("FAIL[stack]: '%s' rejected: %s\n", good[i], err); *fail = 1; }
@@ -515,6 +557,9 @@ int main(int argc, char **argv) {
 
 	/* "right" (dependent view alone) coverage (M5) */
 	test_right_view(path, &fail);
+
+	/* "alt" (interleaved views: 2x frames at 2x rate) coverage */
+	test_alt(path, &fail);
 
 	/* "swaplr" (swap the two views in any layout) coverage */
 	test_swaplr(path, &fail);

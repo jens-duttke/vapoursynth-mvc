@@ -34,6 +34,8 @@ struct MvcSource {
 	const uint8_t *end;    /* one past the last byte */
 	int n_threads;
 	int swaplr;            /* emit the two views swapped (base <-> dependent) */
+	int num_pics;          /* decoded source pictures (base primary); the output
+	                          frame count is 2x this for MVC_ALT */
 	MvcInfo info;
 
 	SeekPoint *idx;
@@ -46,6 +48,15 @@ struct MvcSource {
 	const uint8_t *nal;    /* current feed position */
 	int next_out;          /* display index of the next frame get_frame will yield */
 	int64_t last_poc;      /* DisplayPoc of the previous output in this run (INT64_MIN after a reset) */
+
+	/* Last decoded source picture, cached so MVC_ALT emits both of its output
+	 * frames (the two views) from one decode. edge264_get_frame(borrow=0) frames
+	 * stay valid until the next edge264_decode_NAL, and a cache hit issues none;
+	 * a decoder reset (edge264_free) invalidates them, so cur_valid is cleared
+	 * there. cur_index is the source display index cur holds. */
+	Edge264Frame cur;
+	int cur_valid;
+	int cur_index;
 };
 
 static void set_err(char *err, size_t n, const char *msg) {
@@ -132,7 +143,7 @@ static void scan_index(MvcSource *s) {
 		const uint8_t *sc = edge264_find_start_code(p, end, 0);
 		p = (sc < end) ? sc + 3 : end;
 	}
-	s->info.num_frames = frames;
+	s->num_pics = frames;
 	s->info.is_mvc = is_mvc;
 }
 
@@ -204,6 +215,7 @@ static int reset_decoder(MvcSource *s) {
 	edge264_free(&s->dec);
 	s->dec = edge264_alloc(s->n_threads, NULL, NULL, 0, NULL, NULL, NULL);
 	s->last_poc = INT64_MIN; /* display order restarts from the seek point */
+	s->cur_valid = 0;        /* freeing the decoder invalidated cur's buffers */
 	return s->dec != NULL;
 }
 
@@ -249,9 +261,11 @@ static void copy_plane(uint8_t *dst, ptrdiff_t dstride, const uint8_t *src,
 		memcpy(dst + (ptrdiff_t)y * dstride, src + (ptrdiff_t)y * sstride, (size_t)w);
 }
 
-/* Write one plane (index 0=Y,1=U,2=V) of frame `f` into dst per the layout. */
+/* Write one plane (index 0=Y,1=U,2=V) of frame `f` into dst per `layout`. The
+ * layout is passed in rather than read from s->info because MVC_ALT resolves,
+ * per output frame, to a single-view MVC_BASE or MVC_RIGHT (see mvc_get_frame). */
 static void assemble_plane(const MvcSource *s, const Edge264Frame *f, int plane,
-	uint8_t *dst, ptrdiff_t dstride) {
+	MvcLayout layout, uint8_t *dst, ptrdiff_t dstride) {
 	int chroma = plane > 0;
 	int w = chroma ? f->width_C : f->width_Y;
 	int h = chroma ? f->height_C : f->height_Y;
@@ -263,7 +277,7 @@ static void assemble_plane(const MvcSource *s, const Edge264Frame *f, int plane,
 	 * authored right-eye-first can be flipped without changing the layout. */
 	const uint8_t *left  = s->swaplr ? dep  : base;
 	const uint8_t *right = s->swaplr ? base : dep;
-	switch (s->info.layout) {
+	switch (layout) {
 	case MVC_BASE:
 		copy_plane(dst, dstride, left, sstride, w, h);
 		break;
@@ -278,6 +292,10 @@ static void assemble_plane(const MvcSource *s, const Edge264Frame *f, int plane,
 		copy_plane(dst, dstride, left, sstride, w, h);
 		copy_plane(dst + w, dstride, right, sstride, w, h);
 		break;
+	case MVC_ALT: /* resolved per output frame in mvc_get_frame; a stray call
+	                 falls back to the left view rather than leaving dst unfilled */
+		copy_plane(dst, dstride, left, sstride, w, h);
+		break;
 	}
 }
 
@@ -287,7 +305,7 @@ const MvcInfo *mvc_info(const MvcSource *s) { return &s->info; }
 
 MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swaplr,
 	int64_t fps_num, int64_t fps_den, char *err, size_t errsize) {
-	if (layout < MVC_BASE || layout > MVC_SBS) { /* else assemble_plane's switch fills nothing */
+	if (layout < MVC_BASE || layout > MVC_ALT) { /* else assemble_plane's switch fills nothing */
 		set_err(err, errsize, "invalid layout");
 		return NULL;
 	}
@@ -322,14 +340,25 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
 	s->end = b + s->map_size;
 
 	scan_index(s);
-	if (s->info.num_frames <= 0) {
+	if (s->num_pics <= 0) {
 		set_err(err, errsize, "no decodable frames found");
 		mvc_close(s);
 		return NULL;
 	}
 	s->info.fps_num = fps_num > 0 ? fps_num : 24000;
 	s->info.fps_den = fps_den > 0 ? fps_den : 1001;
-	s->info.layout = (layout == MVC_TAB || layout == MVC_SBS) && !s->info.is_mvc ? MVC_BASE : layout;
+	/* the two-view layouts need a dependent view; on a 2D stream they degrade to
+	 * the base (mono) view. */
+	int two_view = (layout == MVC_TAB || layout == MVC_SBS || layout == MVC_ALT);
+	s->info.layout = (two_view && !s->info.is_mvc) ? MVC_BASE : layout;
+	/* MVC_ALT interleaves both views into one clip: twice the frames, and twice
+	 * the frame rate so the clip keeps the source's wall-clock duration. */
+	if (s->info.layout == MVC_ALT) {
+		s->info.fps_num *= 2;
+		s->info.num_frames = s->num_pics * 2;
+	} else {
+		s->info.num_frames = s->num_pics;
+	}
 
 	/* decode the first frame for exact (post-crop) per-view dimensions */
 	s->dec = edge264_alloc(n_threads, NULL, NULL, 0, NULL, NULL, NULL);
@@ -345,6 +374,11 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
 		return NULL;
 	}
 	s->next_out = 1;
+	/* keep the first picture cached: the decoder is untouched until the first
+	 * get_frame, so frame 0 is served without a backward seek + re-decode */
+	s->cur = f;
+	s->cur_valid = 1;
+	s->cur_index = 0;
 	s->info.base_width = f.width_Y;
 	s->info.base_height = f.height_Y;
 	switch (s->info.layout) {
@@ -355,16 +389,14 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
 	return s;
 }
 
-int mvc_get_frame(MvcSource *s, int n,
-	uint8_t *dstY, ptrdiff_t strideY,
-	uint8_t *dstU, ptrdiff_t strideU,
-	uint8_t *dstV, ptrdiff_t strideV,
-	char *err, size_t errsize) {
-	if (n < 0 || n >= s->info.num_frames) {
-		set_err(err, errsize, "frame index out of range");
-		return -1;
-	}
-	if (seek_to(s, n) < 0) {
+/* Ensure source picture `src_n` is decoded and cached in s->cur, seeking if
+ * needed. The cache lets MVC_ALT serve both views of a picture from a single
+ * decode (the second view is a cache hit, so it issues no edge264_decode_NAL and
+ * cur stays valid). Returns 0 on success, -1 on error (message in err). */
+static int ensure_source_frame(MvcSource *s, int src_n, char *err, size_t errsize) {
+	if (s->cur_valid && s->cur_index == src_n)
+		return 0;
+	if (seek_to(s, src_n) < 0) {
 		set_err(err, errsize, "failed to allocate the decoder");
 		return -1;
 	}
@@ -376,13 +408,38 @@ int mvc_get_frame(MvcSource *s, int n,
 			return -1;
 		}
 		int idx = s->next_out++;
-		if (idx == n) {
-			assemble_plane(s, &f, 0, dstY, strideY);
-			assemble_plane(s, &f, 1, dstU, strideU);
-			assemble_plane(s, &f, 2, dstV, strideV);
+		if (idx == src_n) {
+			s->cur = f;
+			s->cur_valid = 1;
+			s->cur_index = idx;
 			return 0;
 		}
 	}
+}
+
+int mvc_get_frame(MvcSource *s, int n,
+	uint8_t *dstY, ptrdiff_t strideY,
+	uint8_t *dstU, ptrdiff_t strideU,
+	uint8_t *dstV, ptrdiff_t strideV,
+	char *err, size_t errsize) {
+	if (n < 0 || n >= s->info.num_frames) {
+		set_err(err, errsize, "frame index out of range");
+		return -1;
+	}
+	/* MVC_ALT produces two output frames per source picture: even -> first view,
+	 * odd -> second view. Every other layout maps the output index straight through. */
+	MvcLayout eff = s->info.layout;
+	int src_n = n;
+	if (s->info.layout == MVC_ALT) {
+		src_n = n >> 1;
+		eff = (n & 1) ? MVC_RIGHT : MVC_BASE;
+	}
+	if (ensure_source_frame(s, src_n, err, errsize) < 0)
+		return -1;
+	assemble_plane(s, &s->cur, 0, eff, dstY, strideY);
+	assemble_plane(s, &s->cur, 1, eff, dstU, strideU);
+	assemble_plane(s, &s->cur, 2, eff, dstV, strideV);
+	return 0;
 }
 
 void mvc_close(MvcSource *s) {

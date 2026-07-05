@@ -23,6 +23,7 @@ typedef enum {
 	MVC_RIGHT = 1, /* dependent / right view only         */
 	MVC_TAB   = 2, /* top-and-bottom: base over dependent */
 	MVC_SBS   = 3, /* side-by-side: base left, dep right  */
+	MVC_ALT   = 4, /* alternating frames: base, dep, base, dep ... (2x the frames) */
 } MvcLayout;
 
 typedef struct {
@@ -32,9 +33,9 @@ typedef struct {
 	int base_height;   /* per-view (cropped) height          */
 	int64_t fps_num;
 	int64_t fps_den;
-	int num_frames;    /* number of output frames (base pictures) */
+	int num_frames;    /* number of output frames: base pictures, or 2x that for MVC_ALT */
 	int is_mvc;        /* stream actually carries a dependent view */
-	MvcLayout layout;  /* effective layout (tab/sbs downgraded to base on 2D) */
+	MvcLayout layout;  /* effective layout (tab/sbs/alt downgraded to base on 2D) */
 } MvcInfo;
 
 /*
@@ -42,8 +43,9 @@ typedef struct {
  * swaps the two views in every layout (base <-> dependent), so a caller can flip
  * a stream authored right-eye-first without changing the layout. fps is only a
  * hint written to the info (edge264's public API does not expose the VUI); pass
- * 0/0 to keep the default 24000/1001. Returns NULL on failure and writes a
- * message to err (if err != NULL).
+ * 0/0 to keep the default 24000/1001. MVC_ALT interleaves the two views into one
+ * clip, so it reports twice the frame count and twice the frame rate. Returns
+ * NULL on failure and writes a message to err (if err != NULL).
  */
 MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swaplr,
 	int64_t fps_num, int64_t fps_den, char *err, size_t errsize);

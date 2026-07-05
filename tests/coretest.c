@@ -3,7 +3,7 @@
  * Verifies stream info, sequential reads, and that a random-access read of a
  * frame is bit-identical to reading it sequentially.
  *
- * usage: coretest <file.264> [layout 0=base 1=right 2=tab 3=sbs]
+ * usage: coretest <file.264> [layout 0=base 1=right 2=tab 3=sbs 4=alt]
  */
 #include "mvcsource.h"
 #include <errno.h>
@@ -22,7 +22,7 @@ static uint64_t fnv_plane(const uint8_t *p, ptrdiff_t stride, int w, int h) {
 }
 
 int main(int argc, char **argv) {
-	if (argc < 2) { fprintf(stderr, "usage: %s <file.264> [layout 0..3]\n", argv[0]); return 2; }
+	if (argc < 2) { fprintf(stderr, "usage: %s <file.264> [layout 0..4]\n", argv[0]); return 2; }
 	MvcLayout layout = argc > 2 ? (MvcLayout)atoi(argv[2]) : MVC_BASE;
 	char err[256] = "";
 

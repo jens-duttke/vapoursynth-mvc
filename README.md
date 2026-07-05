@@ -43,8 +43,9 @@ clip = core.mvc.Source(r"movie.264", stack="tab")
 ```
 
 `stack` selects the layout: `"base"` (left/2D), `"right"`, `"tab"`
-(top-and-bottom) or `"sbs"` (side-by-side). On a 2D stream the stacked modes
-fall back to the single view.
+(top-and-bottom), `"sbs"` (side-by-side) or `"alt"` (alternating frames: base,
+dependent, base, dependent ... - twice the frames at twice the frame rate). On a
+2D stream the stacked/alternating modes fall back to the single view.
 
 `swaplr=1` swaps the two views in any layout (base <-> dependent), so a stream
 authored right-eye-first can be flipped to left-eye-first without re-authoring.
@@ -58,7 +59,7 @@ against edge264-mvc `v2026.07.05`.
 
 ```sh
 make EDGE264_SRC=/path/to/edge264-mvc          # builds the decode core + tests
-./coretest movie.264 2                          # 0=base 1=right 2=tab 3=sbs
+./coretest movie.264 2                          # 0=base 1=right 2=tab 3=sbs 4=alt
 ```
 
 ## Layout
