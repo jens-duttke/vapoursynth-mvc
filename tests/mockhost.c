@@ -245,6 +245,23 @@ static VSNode *call_source(const char *path, const char *stack, char *err, size_
 	return node;
 }
 
+/* Like call_source but also sets the swaplr int arg, so the view-swap semantics
+ * can be driven through the real plugin entry point. */
+static VSNode *call_source_swap(const char *path, const char *stack, int swaplr, char *err, size_t errn) {
+	VSMap *in = mock_createMap(), *out = mock_createMap();
+	mock_mapSetData(in, "source", path, -1, 0, 0);
+	if (stack) mock_mapSetData(in, "stack", stack, -1, 0, 0);
+	mock_mapSetInt(in, "swaplr", swaplr, 0);
+	VSCore core = {0};
+	g_source_func(in, out, NULL, &core, &g_api);
+	VSNode *node = NULL;
+	const char *e = mock_mapGetError(out);
+	if (e) { snprintf(err, errn, "%s", e); }
+	else { int ee = 0; node = mock_mapGetNode(out, "clip", 0, &ee); if (ee) snprintf(err, errn, "no clip returned"); }
+	mock_freeMap(in); mock_freeMap(out);
+	return node;
+}
+
 /* Drive Source with optional integer fps args (a present flag per field), so the
  * fps pairing semantics can be exercised. Returns the node (caller frees via
  * free_node) or NULL, and copies any error text into err. */
@@ -338,16 +355,17 @@ static uint64_t hash_plane0(const VSFrame *fr, int w, int h) {
 	return x;
 }
 
-/* Pull frame 0 of `node` through the real getFrame path and hash its luma. */
-static int frame0_hash(VSNode *node, uint64_t *out) {
+/* Pull frame `n` of `node` through the real getFrame path and hash its luma. */
+static int frameN_hash(VSNode *node, int n, uint64_t *out) {
 	VSCore core = {0}; void *fd = NULL; VSFrameContext ctx = {0};
 	const VSVideoInfo *vi = mock_getVideoInfo(node);
-	const VSFrame *fr = node->getFrame(0, arInitial, node->inst, &fd, &ctx, &core, &g_api);
+	const VSFrame *fr = node->getFrame(n, arInitial, node->inst, &fd, &ctx, &core, &g_api);
 	if (!fr) return -1;
 	*out = hash_plane0(fr, vi->width, vi->height);
 	mock_freeFrame(fr);
 	return 0;
 }
+static int frame0_hash(VSNode *node, uint64_t *out) { return frameN_hash(node, 0, out); }
 
 /* M5: the "right" stack (dependent view alone) must actually map to MVC_RIGHT
  * and serve a different view than "base". On an MVC stream base and right share
@@ -375,6 +393,36 @@ static void test_right_view(const char *path, int *fail) {
 	}
 done:
 	free_node(b); free_node(r); free_node(t);
+}
+
+/* swaplr swaps the two views in every layout. On an MVC stream base+swaplr must
+ * equal right and right+swaplr must equal base; on a 2D stream (no dependent
+ * view) swaplr is a no-op. */
+static void test_swaplr(const char *path, int *fail) {
+	char err[512];
+	VSNode *b  = call_source(path, "base", err, sizeof err);
+	VSNode *r  = call_source(path, "right", err, sizeof err);
+	VSNode *t  = call_source(path, "tab", err, sizeof err);
+	VSNode *bs = call_source_swap(path, "base", 1, err, sizeof err);
+	VSNode *rs = call_source_swap(path, "right", 1, err, sizeof err);
+	if (!b || !r || !t || !bs || !rs) { printf("FAIL[swaplr]: open failed: %s\n", err); *fail = 1; goto done; }
+	const VSVideoInfo *vib = mock_getVideoInfo(b), *vit = mock_getVideoInfo(t);
+	int is_mvc = vit->height == 2 * vib->height;
+	uint64_t hb = 0, hr = 0, hbs = 0, hrs = 0;
+	if (frameN_hash(b, 0, &hb) || frameN_hash(r, 0, &hr) ||
+	    frameN_hash(bs, 0, &hbs) || frameN_hash(rs, 0, &hrs)) {
+		printf("FAIL[swaplr]: getFrame failed\n"); *fail = 1; goto done;
+	}
+	int bad = 0;
+	if (is_mvc) {
+		if (hbs != hr) { printf("FAIL[swaplr]: base+swaplr != right\n"); bad = 1; }
+		if (hrs != hb) { printf("FAIL[swaplr]: right+swaplr != base\n"); bad = 1; }
+	} else if (hbs != hb) {
+		printf("FAIL[swaplr]: 2D base+swaplr changed the view\n"); bad = 1;
+	}
+	if (bad) *fail = 1; else printf("ok[swaplr]: swaps the two views (mvc=%d)\n", is_mvc);
+done:
+	free_node(b); free_node(r); free_node(t); free_node(bs); free_node(rs);
 }
 
 /* L5: an unrecognized stack string must be rejected, not silently degraded to
@@ -467,6 +515,9 @@ int main(int argc, char **argv) {
 
 	/* "right" (dependent view alone) coverage (M5) */
 	test_right_view(path, &fail);
+
+	/* "swaplr" (swap the two views in any layout) coverage */
+	test_swaplr(path, &fail);
 
 	/* unknown stack strings must be rejected, not silently degraded (L5) */
 	test_bad_stack(path, &fail);

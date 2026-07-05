@@ -75,6 +75,10 @@ static void VS_CC vs_source_create(const VSMap *in, VSMap *out, void *userData,
 		vsapi->mapSetError(out, buf);
 		return;
 	}
+	/* swaplr: flip the two views in whatever layout was chosen (default off). Any
+	 * nonzero value means on; mvc_open normalises it. */
+	int swaplr = vsapi->mapGetIntSaturated(in, "swaplr", 0, &e);
+	if (e) swaplr = 0;
 	int threads = vsapi->mapGetIntSaturated(in, "threads", 0, &e);
 	if (e) threads = 0;
 	/* fpsnum/fpsden are a pair: an unset key sets e (peUnset). Treat them
@@ -96,7 +100,7 @@ static void VS_CC vs_source_create(const VSMap *in, VSMap *out, void *userData,
 	if (!have_num) { fpsnum = 0; fpsden = 0; }
 
 	char emsg[256];
-	MvcSource *src = mvc_open(source, threads, (MvcLayout)layout, fpsnum, fpsden, emsg, sizeof emsg);
+	MvcSource *src = mvc_open(source, threads, (MvcLayout)layout, swaplr, fpsnum, fpsden, emsg, sizeof emsg);
 	if (!src) {
 		char buf[320];
 		snprintf(buf, sizeof buf, "mvc.Source: %s", emsg);
@@ -136,8 +140,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
 	vspapi->configPlugin("de.duttke.mvc", "mvc",
 		"H.264 MVC (3D) and AVC source, built on edge264-mvc",
 		VS_MAKE_VERSION(0, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
+	/* swaplr is appended after the v0.1.0 argument set so existing positional
+	 * calls (threads/fpsnum/fpsden) keep their indices. */
 	vspapi->registerFunction("Source",
-		"source:data;stack:data:opt;threads:int:opt;fpsnum:int:opt;fpsden:int:opt;",
+		"source:data;stack:data:opt;threads:int:opt;fpsnum:int:opt;fpsden:int:opt;swaplr:int:opt;",
 		"clip:vnode;",
 		vs_source_create, NULL, plugin);
 }

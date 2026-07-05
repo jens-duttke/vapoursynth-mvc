@@ -38,12 +38,14 @@ typedef struct {
 } MvcInfo;
 
 /*
- * Open a stream. n_threads: 0 single-thread, -1 auto, >0 explicit. fps is only
- * a hint written to the info (edge264's public API does not expose the VUI);
- * pass 0/0 to keep the default 24000/1001. Returns NULL on failure and writes a
+ * Open a stream. n_threads: 0 single-thread, -1 auto, >0 explicit. swaplr (0/1)
+ * swaps the two views in every layout (base <-> dependent), so a caller can flip
+ * a stream authored right-eye-first without changing the layout. fps is only a
+ * hint written to the info (edge264's public API does not expose the VUI); pass
+ * 0/0 to keep the default 24000/1001. Returns NULL on failure and writes a
  * message to err (if err != NULL).
  */
-MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout,
+MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swaplr,
 	int64_t fps_num, int64_t fps_den, char *err, size_t errsize);
 
 const MvcInfo *mvc_info(const MvcSource *s);

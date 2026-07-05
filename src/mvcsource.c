@@ -33,6 +33,7 @@ struct MvcSource {
 	const uint8_t *start;  /* first NAL (past the leading start code) */
 	const uint8_t *end;    /* one past the last byte */
 	int n_threads;
+	int swaplr;            /* emit the two views swapped (base <-> dependent) */
 	MvcInfo info;
 
 	SeekPoint *idx;
@@ -258,20 +259,24 @@ static void assemble_plane(const MvcSource *s, const Edge264Frame *f, int plane,
 	const uint8_t *base = f->samples[plane];
 	/* a frame may miss its dependent view (lone base at a gap): reuse base */
 	const uint8_t *dep = f->samples_mvc[plane] ? f->samples_mvc[plane] : base;
+	/* swaplr swaps which physical view fills the left/first slot, so a stream
+	 * authored right-eye-first can be flipped without changing the layout. */
+	const uint8_t *left  = s->swaplr ? dep  : base;
+	const uint8_t *right = s->swaplr ? base : dep;
 	switch (s->info.layout) {
 	case MVC_BASE:
-		copy_plane(dst, dstride, base, sstride, w, h);
+		copy_plane(dst, dstride, left, sstride, w, h);
 		break;
 	case MVC_RIGHT:
-		copy_plane(dst, dstride, dep, sstride, w, h);
+		copy_plane(dst, dstride, right, sstride, w, h);
 		break;
 	case MVC_TAB:
-		copy_plane(dst, dstride, base, sstride, w, h);
-		copy_plane(dst + (ptrdiff_t)h * dstride, dstride, dep, sstride, w, h);
+		copy_plane(dst, dstride, left, sstride, w, h);
+		copy_plane(dst + (ptrdiff_t)h * dstride, dstride, right, sstride, w, h);
 		break;
 	case MVC_SBS:
-		copy_plane(dst, dstride, base, sstride, w, h);
-		copy_plane(dst + w, dstride, dep, sstride, w, h);
+		copy_plane(dst, dstride, left, sstride, w, h);
+		copy_plane(dst + w, dstride, right, sstride, w, h);
 		break;
 	}
 }
@@ -280,7 +285,7 @@ static void assemble_plane(const MvcSource *s, const Edge264Frame *f, int plane,
 
 const MvcInfo *mvc_info(const MvcSource *s) { return &s->info; }
 
-MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout,
+MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swaplr,
 	int64_t fps_num, int64_t fps_den, char *err, size_t errsize) {
 	if (layout < MVC_BASE || layout > MVC_SBS) { /* else assemble_plane's switch fills nothing */
 		set_err(err, errsize, "invalid layout");
@@ -289,6 +294,7 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout,
 	MvcSource *s = calloc(1, sizeof *s);
 	if (!s) { set_err(err, errsize, "out of memory"); return NULL; }
 	s->n_threads = n_threads;
+	s->swaplr = swaplr != 0;
 
 	int fd = open(path, O_RDONLY);
 	struct stat st;

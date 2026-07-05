@@ -7,7 +7,7 @@
 #          tests/test.vpy - | ffmpeg -i - -frames:v 1 -f framemd5 -
 #
 # Args (via vspipe --arg): plugin (path to the .so), source (path to the .264),
-# stack (base|right|tab|sbs).
+# stack (base|right|tab|sbs), swaplr (0|1, swap the two views).
 # Capture the args vspipe injected as globals *before* our own imports add names,
 # so a mistyped --arg name (e.g. stak=sbs, which would otherwise vanish into the
 # script default) can be reported instead of silently ignored.
@@ -18,12 +18,13 @@ import vapoursynth as vs
 
 core = vs.core
 
-_KNOWN_ARGS = {"plugin", "source", "stack"}
+_KNOWN_ARGS = {"plugin", "source", "stack", "swaplr"}
 _STACKS = ("base", "right", "tab", "sbs")
 
 plugin = globals().get("plugin", "./libvsmvc.so")
 source = globals().get("source")
 stack = globals().get("stack", "tab")
+swaplr = globals().get("swaplr")
 if not source:
     raise ValueError("pass --arg source=<file.264>")
 if stack not in _STACKS:
@@ -34,7 +35,9 @@ if _unexpected:
           + ", ".join(sorted(_unexpected)), file=sys.stderr)
 
 core.std.LoadPlugin(plugin)
-clip = core.mvc.Source(source=source, stack=stack)
+# swaplr is only forwarded when given, so the default (off) is exercised too.
+_kwargs = {"swaplr": int(swaplr)} if swaplr is not None else {}
+clip = core.mvc.Source(source=source, stack=stack, **_kwargs)
 
 print(f"vapoursynth-mvc: {clip.width}x{clip.height}  {clip.num_frames} frames  "
       f"{clip.fps_num}/{clip.fps_den} fps  format={clip.format.name}", file=sys.stderr)

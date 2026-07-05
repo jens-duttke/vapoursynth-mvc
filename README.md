@@ -46,6 +46,9 @@ clip = core.mvc.Source(r"movie.264", stack="tab")
 (top-and-bottom) or `"sbs"` (side-by-side). On a 2D stream the stacked modes
 fall back to the single view.
 
+`swaplr=1` swaps the two views in any layout (base <-> dependent), so a stream
+authored right-eye-first can be flipped to left-eye-first without re-authoring.
+
 ## Building
 
 Requires a C compiler and an [edge264-mvc](https://github.com/jens-duttke/edge264-mvc)

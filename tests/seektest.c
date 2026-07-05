@@ -132,7 +132,7 @@ static int check_seek_consistency(const char *label, const uint8_t *stream, size
 	if (!path) { printf("FAIL[%s]: cannot write temp file\n", label); return 1; }
 
 	char err[256] = "";
-	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, err, sizeof err);
+	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, err, sizeof err);
 	if (!s) { printf("FAIL[%s]: open failed: %s\n", label, err); unlink(path); free(path); return 1; }
 	const MvcInfo *in = mvc_info(s);
 	int W = in->width, H = in->height, CW = W / 2, CH = H / 2, N = in->num_frames;
@@ -172,7 +172,7 @@ static int decode_hashes(const char *label, const uint8_t *stream, size_t n,
 	char *path = write_temp(stream, n);
 	if (!path) { printf("FAIL[%s]: cannot write temp file\n", label); return -1; }
 	char err[256] = "";
-	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, err, sizeof err);
+	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, err, sizeof err);
 	if (!s) { printf("FAIL[%s]: open failed: %s\n", label, err); unlink(path); free(path); return -1; }
 	const MvcInfo *in = mvc_info(s);
 	int W = in->width, H = in->height, CW = W / 2, CH = H / 2, N = in->num_frames;
