@@ -140,7 +140,7 @@ static void VS_CC vs_source_create(const VSMap *in, VSMap *out, void *userData,
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
 	vspapi->configPlugin("de.duttke.mvc", "mvc",
 		"H.264 MVC (3D) and AVC source, built on edge264-mvc",
-		VS_MAKE_VERSION(0, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
+		VS_MAKE_VERSION(0, 2), VAPOURSYNTH_API_VERSION, 0, plugin);
 	/* swaplr is appended after the v0.1.0 argument set so existing positional
 	 * calls (threads/fpsnum/fpsden) keep their indices. */
 	vspapi->registerFunction("Source",
