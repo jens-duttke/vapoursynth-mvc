@@ -12,13 +12,13 @@
 #   CC, CFLAGS   compiler and flags.
 
 CC        ?= cc
-CXX       ?= c++
+# MinGW dlltool for the Windows cross-build's import library (see $(AVS_DLL)).
+DLLTOOL   ?= x86_64-w64-mingw32-dlltool
 # Preference flags only (a user/CI CFLAGS override replaces these). The
 # semantically-required -fPIC for the shared object lives in the $(PLUGIN) rule,
-# so an override cannot silently drop it.
+# so an override cannot silently drop it. Everything here is C - both plugins and
+# the tests - so no C++ compiler is needed.
 CFLAGS    ?= -O2 -std=gnu11 -Wall -Wextra
-# C++17 for the AviSynth+ glue: the vendored avisynth.h pulls in <filesystem>.
-CXXFLAGS  ?= -O2 -std=gnu++17 -Wall -Wextra
 EDGE264_SRC ?= ../edge264
 
 EDGE264_A := $(EDGE264_SRC)/libedge264.a
@@ -49,34 +49,38 @@ $(PLUGIN): src/plugin.c src/mvcsource.c src/mvcsource.h $(EDGE264_A)
 	    src/plugin.c src/mvcsource.c $(EDGE264_A) -pthread \
 	    -Wl,--exclude-libs,ALL -o $@
 
-# The AviSynth+ plugin: the same decode core plus a C++ IClip glue. mvcsource.c
-# must be compiled as C (it uses C-only idioms g++ would reject), so it is built
-# to an object with CC and linked against the C++ glue by CXX. As with the
-# VapourSynth plugin, only the host entry point (AvisynthPluginInit3) is exported
-# and edge264's statically-linked symbols are hidden.
-$(AVS_PLUGIN): src/avisynth_plugin.cpp src/mvcsource.c src/mvcsource.h $(EDGE264_A)
-	$(CC) $(CFLAGS) -fPIC -fvisibility=hidden $(INCLUDES) -c src/mvcsource.c -o src/mvcsource.avs.o
-	$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden $(INCLUDES) -shared \
-	    src/avisynth_plugin.cpp src/mvcsource.avs.o $(EDGE264_A) -pthread \
+# The AviSynth+ plugin: the same decode core plus C-interface glue. Both are C,
+# so a single $(CC) invocation builds the shared object. The C interface (not the
+# C++ API) is used so the identical source cross-compiles to a Windows .dll that
+# loads in the MSVC-built AviSynth+. Only avisynth_c_plugin_init is exported (it
+# carries visibility=default in the source; everything else is hidden) and
+# edge264's statically-linked symbols are hidden.
+# -Wno-missing-field-initializers: the vendored avisynth_c.h defines
+# `avs_void = {'v'}` (first field only) by design; silence that upstream warning
+# here rather than patch a vendored file.
+$(AVS_PLUGIN): src/avisynth_plugin.c src/mvcsource.c src/mvcsource.h $(EDGE264_A)
+	$(CC) $(CFLAGS) -Wno-missing-field-initializers -fPIC -fvisibility=hidden $(INCLUDES) -shared \
+	    src/avisynth_plugin.c src/mvcsource.c $(EDGE264_A) -pthread \
 	    -Wl,--exclude-libs,ALL -o $@
-	rm -f src/mvcsource.avs.o
 
 # Windows cross-build of the AviSynth+ plugin (.dll). Invoke with the MinGW-w64
 # toolchain and a Windows edge264 build, e.g.:
-#   make libavsmvc.dll CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
+#   make libavsmvc.dll CC=x86_64-w64-mingw32-gcc DLLTOOL=x86_64-w64-mingw32-dlltool \
 #        EDGE264_SRC=/path/to/edge264-win \
 #        EDGE264_MAKE="OS=windows CC=x86_64-w64-mingw32-gcc"
-# On Windows the export is driven by __declspec(dllexport) (avisynth_plugin.cpp),
-# so only AvisynthPluginInit3 leaves the DLL and edge264 stays hidden. The
-# -static* flags link libgcc/libstdc++/winpthread in, so the .dll depends only on
-# KERNEL32/msvcrt - no MinGW runtime needed at load time. No -fPIC/-fvisibility
-# (those are POSIX shared-object semantics; Windows uses __declspec instead).
-$(AVS_DLL): src/avisynth_plugin.cpp src/mvcsource.c src/mvcsource.h $(EDGE264_A)
-	$(CC) $(CFLAGS) $(INCLUDES) -c src/mvcsource.c -o src/mvcsource.win.o
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -shared \
-	    src/avisynth_plugin.cpp src/mvcsource.win.o $(EDGE264_A) \
-	    -static -static-libgcc -static-libstdc++ -pthread -o $@
-	rm -f src/mvcsource.win.o
+# The C interface is used precisely so this MinGW-built .dll loads in the official
+# MSVC-built AviSynth+ (the C++ vtable ABI does not match across GCC/MSVC). The
+# import library for AviSynth's C API is generated from a .def with dlltool, so no
+# AviSynth.dll/.lib is needed at build time; the .dll's import table references
+# AviSynth.dll, which the host resolves at load time. __declspec(dllexport) on
+# avisynth_c_plugin_init exports only that entry; edge264 stays hidden. -static*
+# link libgcc/winpthread in, so the .dll depends only on KERNEL32/msvcrt/AviSynth.
+$(AVS_DLL): src/avisynth_plugin.c src/mvcsource.c src/mvcsource.h src/avisynth_win.def $(EDGE264_A)
+	$(DLLTOOL) -d src/avisynth_win.def -D AviSynth.dll -l avisynth.dll.a
+	$(CC) $(CFLAGS) -Wno-missing-field-initializers $(INCLUDES) -shared \
+	    src/avisynth_plugin.c src/mvcsource.c $(EDGE264_A) avisynth.dll.a \
+	    -static -static-libgcc -pthread -o $@
+	rm -f avisynth.dll.a
 
 # Standalone decode-core test (no VapourSynth needed).
 coretest: tests/coretest.c src/mvcsource.c src/mvcsource.h $(EDGE264_A)

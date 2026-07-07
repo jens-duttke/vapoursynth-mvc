@@ -149,8 +149,10 @@ jobs:
         run: git clone --depth 1 --branch "$EDGE264_REF" https://github.com/jens-duttke/edge264-mvc ../edge264
       - name: Install MinGW-w64, Wine and ffmpeg
         run: |
+          # gcc-mingw-w64-x86-64 pulls in binutils (dlltool). No g++ needed: both
+          # plugins and the tests are C.
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64 ffmpeg
+          sudo apt-get install -y gcc-mingw-w64-x86-64 wine64 ffmpeg
       - name: Linux edge264_test (generates the bit-exact reference)
         run: make -C ../edge264 STATIC=yes BUILDTEST=no edge264_test
       - name: Cross-build edge264 for Windows (separate tree)
@@ -162,12 +164,12 @@ jobs:
           make -C ../edge264-win OS=windows CC=x86_64-w64-mingw32-gcc STATIC=yes BUILDTEST=no
       - name: Cross-build the plugin DLL and verify its exports
         run: |
-          make libavsmvc.dll CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
+          make libavsmvc.dll CC=x86_64-w64-mingw32-gcc DLLTOOL=x86_64-w64-mingw32-dlltool \
             EDGE264_SRC=../edge264-win EDGE264_MAKE="OS=windows CC=x86_64-w64-mingw32-gcc"
           file libavsmvc.dll
           x86_64-w64-mingw32-objdump -p libavsmvc.dll | grep -A2 "Ordinal/Name Pointer"
-          # exactly AvisynthPluginInit3 is exported and no edge264 symbol leaks
-          x86_64-w64-mingw32-objdump -p libavsmvc.dll | grep -q "] AvisynthPluginInit3"
+          # exactly avisynth_c_plugin_init is exported and no edge264 symbol leaks
+          x86_64-w64-mingw32-objdump -p libavsmvc.dll | grep -q "] avisynth_c_plugin_init"
           test "$(x86_64-w64-mingw32-objdump -p libavsmvc.dll | grep -c -i edge264)" = "0"
       - name: Windows core bit-exact via Wine (proves the Win32 I/O shim)
         run: |

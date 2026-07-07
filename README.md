@@ -29,15 +29,16 @@ both hosts** (correct frame count, dimensions, frame-accurate seeking).
 - [x] **VapourSynth glue** (`src/plugin.c`) - the API4 filter `mvc.Source`.
   Covered by `tests/mockhost.c` (drives the built plugin through the real API4)
   and confirmed bit-exact in a real VapourSynth runtime (Core R77).
-- [x] **AviSynth+ glue** (`src/avisynth_plugin.cpp`) - the `MVCSource` filter.
-  Loaded through a real AviSynth+ runtime by `tests/avshost.c` (its C API) and
-  confirmed bit-exact there (AviSynth+ 3.7.3).
-- [x] **Windows build** - both plugins cross-compile with MinGW-w64 to a
-  self-contained `.dll` (only `AvisynthPluginInit3` exported; depends on nothing
-  but `KERNEL32`/`msvcrt`). The Windows I/O path (a Win32 file mapping in place
-  of `mmap`) is **bit-exact-verified** via the core test under Wine. Loading the
-  `.dll` inside a Windows AviSynth+ host is the natural final validation - the
-  glue itself is platform-independent C++ and already bit-exact on Linux.
+- [x] **AviSynth+ glue** (`src/avisynth_plugin.c`) - the `MVCSource` filter,
+  written to the AviSynth **C interface** (not the C++ API) so a MinGW-cross-built
+  `.dll` loads in the official MSVC-built Windows AviSynth+; the C++ vtable ABI
+  does not match across GCC and MSVC. Loaded through a real AviSynth+ by
+  `tests/avshost.c` and confirmed bit-exact (AviSynth+ 3.7.3).
+- [x] **Windows build** - the AviSynth+ plugin cross-compiles with MinGW-w64 to a
+  self-contained `.dll` (only `avisynth_c_plugin_init` exported, edge264 hidden;
+  imports only `KERNEL32`/`msvcrt`/`AviSynth.dll`). Verified **bit-exact in the
+  official MSVC-built Windows AviSynth+ 3.7.3** end-to-end - both the Win32
+  file-mapping I/O path and the C-interface glue.
 - [ ] VUI frame-rate auto-detection; on-disk index cache for fast reopening.
 
 ## Usage
@@ -100,20 +101,25 @@ against edge264-mvc `v2026.07.07` and AviSynth+ `v3.7.3`.
 ### Windows cross-build (MinGW-w64)
 
 The AviSynth+ plugin cross-compiles from Linux to a self-contained Windows `.dll`
-(needs `gcc-mingw-w64-x86-64` and `g++-mingw-w64-x86-64`):
+that loads in the official MSVC-built AviSynth+ - it uses the AviSynth C interface
+precisely so the GCC/MSVC C++ ABI mismatch does not apply. Needs
+`gcc-mingw-w64-x86-64` (and its `binutils` for `dlltool`); no `AviSynth.dll` is
+needed at build time - the import library is generated from
+`src/avisynth_win.def`.
 
 ```sh
 # edge264 for Windows - a separate tree keeps its objects apart from a Linux build:
 cp -r ../edge264 ../edge264-win && make -C ../edge264-win clean
 make -C ../edge264-win OS=windows CC=x86_64-w64-mingw32-gcc STATIC=yes BUILDTEST=no
 # the plugin DLL:
-make libavsmvc.dll CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
+make libavsmvc.dll CC=x86_64-w64-mingw32-gcc DLLTOOL=x86_64-w64-mingw32-dlltool \
     EDGE264_SRC=../edge264-win EDGE264_MAKE="OS=windows CC=x86_64-w64-mingw32-gcc"
 ```
 
-The `windows-cross` CI job runs exactly this, then checks the DLL's exports and
-runs the core under Wine bit-exact vs an edge264 reference. `make coretest.exe`
-(same MinGW flags) builds the standalone core test as a Windows binary.
+The `windows-cross` CI job runs exactly this, verifies the DLL's exports, and runs
+the core under Wine bit-exact vs an edge264 reference. `make coretest.exe` (same
+MinGW flags) builds the standalone core test as a Windows binary. The DLL was
+additionally verified bit-exact in a real MSVC-built Windows AviSynth+.
 
 ## Testing
 
@@ -135,7 +141,8 @@ make check-avs TEST_FILE=movie.264
 - `src/mvcsource.{c,h}` - the host-independent decode core (all the logic;
   shared by both plugins, unit-testable without a frameserver runtime).
 - `src/plugin.c` - VapourSynth API4 glue (`mvc.Source`).
-- `src/avisynth_plugin.cpp` - AviSynth+ glue (`MVCSource`).
+- `src/avisynth_plugin.c` - AviSynth+ C-interface glue (`MVCSource`);
+  `src/avisynth_win.def` lists its C-API imports for the Windows cross-build.
 - `tests/coretest.c` - standalone core verification (info, sequential decode,
   seek == sequential, raw-frame dump for cross-checking).
 - `tests/mockhost.c` - a mock VapourSynth API4 host driving the built plugin.

@@ -1,0 +1,18 @@
+; Import definitions for the AviSynth+ C-API functions the plugin calls. A MinGW
+; cross-build uses this with dlltool to generate an import library, so the .dll
+; links without needing the (MSVC-built) AviSynth.dll or its .lib at build time.
+; The LIBRARY name is what the plugin's import table references; at load time the
+; host AviSynth resolves it. Only AVSC_API entries need importing - the AVSC_INLINE
+; value helpers (avs_defined, avs_as_string, avs_array_elt, avs_new_value_error, ...)
+; are header-only. Keep in sync with the avs_* calls in avisynth_plugin.c.
+LIBRARY AviSynth.dll
+EXPORTS
+avs_add_function
+avs_new_c_filter
+avs_set_to_clip
+avs_release_clip
+avs_new_video_frame_a
+avs_get_pitch_p
+avs_get_write_ptr_p
+avs_save_string
+avs_release_video_frame
