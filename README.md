@@ -55,7 +55,7 @@ authored right-eye-first can be flipped to left-eye-first without re-authoring.
 Requires a C compiler and an [edge264-mvc](https://github.com/jens-duttke/edge264-mvc)
 source tree (pin a release tag for reproducible builds). The VapourSynth SDK
 headers are vendored under `include/`. CI builds and bit-exact-verifies the plugin
-against edge264-mvc `v2026.07.05`.
+against edge264-mvc `v2026.07.07`.
 
 ```sh
 make EDGE264_SRC=/path/to/edge264-mvc          # builds the decode core + tests
