@@ -87,13 +87,38 @@ static int open_num_frames(const char *path) {
 }
 
 /* Overwrite the little-endian int32 at byte offset `off` in `path`. The sidecar
- * layout is magic[8] src_size[8] src_mtime[8] num_pics[4] ... - num_pics is at
- * offset 24. Returns 0 on success. */
+ * layout is magic[8] src_size[8] src_mtime[8] num_pics[4] is_mvc[4] nidx[4]
+ * nps[4], then ioff[nidx] (int64), ifr[nidx] (int32), ... - so num_pics is at
+ * offset 24, nidx at 32, and ifr[] at 40 + nidx*8. Returns 0 on success. */
 static int patch_i32(const char *path, long off, int32_t val) {
 	FILE *f = fopen(path, "r+b");
 	if (!f) return -1;
 	int rc = fseek(f, off, SEEK_SET) == 0 && fwrite(&val, sizeof val, 1, f) == 1 ? 0 : -1;
 	if (fclose(f) != 0) rc = -1;
+	return rc;
+}
+
+/* Read the little-endian int32 at byte offset `off` in `path`, or -1 on error. */
+static int read_i32(const char *path, long off, int32_t *out) {
+	FILE *f = fopen(path, "rb");
+	if (!f) return -1;
+	int rc = fseek(f, off, SEEK_SET) == 0 && fread(out, sizeof *out, 1, f) == 1 ? 0 : -1;
+	fclose(f);
+	return rc;
+}
+
+/* Open `path` (base view) and hash frame n's Y plane into *out. 0 on success. */
+static int hash_frame_n(const char *path, int n, uint64_t *out) {
+	char err[256] = "";
+	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, 0, err, sizeof err);
+	if (!s) { fprintf(stderr, "  open failed: %s\n", err); return -1; }
+	const MvcInfo *in = mvc_info(s);
+	int W = in->width, H = in->height, CW = W / 2, CH = H / 2, rc = -1;
+	uint8_t *Y = malloc((size_t)W * H), *U = malloc((size_t)CW * CH), *V = malloc((size_t)CW * CH);
+	if (Y && U && V && !mvc_get_frame(s, n, Y, W, U, CW, V, CW, err, sizeof err)) {
+		*out = fnv_plane(Y, W, W, H); rc = 0;
+	} else if (Y && U && V) fprintf(stderr, "  frame %d failed: %s\n", n, err);
+	free(Y); free(U); free(V); mvc_close(s);
 	return rc;
 }
 
@@ -171,6 +196,31 @@ int main(int argc, char **argv) {
 			int nf = open_num_frames(tmp);
 			if (nf != real_nf) { printf("FAIL[numpics]: forged num_pics accepted (num_frames=%d, real=%d)\n", nf, real_nf); ok = 0; }
 			else printf("ok[numpics]: oversized num_pics rejected, rescanned to %d frames\n", nf);
+		}
+	}
+
+	/* 6. corrupt seek-point frame numbers: a sidecar with valid magic/size/mtime
+	 * but a non-monotone (or out-of-range) ifr[] must be ignored. Trusting it lets
+	 * the seek binary search pick a seek point whose stored frame index is
+	 * inconsistent with the picture its byte offset points at, so a seek sets
+	 * next_out to the wrong display position and the clip serves the WRONG frame.
+	 * Write a fresh valid sidecar, patch one interior seek point's frame index
+	 * below its predecessor, and request a frame that seeks through it. */
+	{
+		uint64_t ref7;
+		if (hash_frame_n(tmp, 7, &ref7)) { printf("FAIL[seekpts]: reference decode of frame 7 failed\n"); ok = 0; }
+		else {
+			remove(cache);
+			(void)open_num_frames(tmp);              /* write a fresh valid sidecar */
+			int32_t nidx = 0;
+			if (read_i32(cache, 32, &nidx) || nidx < 3) { printf("WARN[seekpts]: sidecar has too few seek points (%d), skipping\n", nidx); }
+			else if (patch_i32(cache, 40 + (long)nidx * 8 + 2 * 4, 2)) { printf("WARN[seekpts]: could not patch sidecar, skipping\n"); } /* ifr[2] = 2 (< ifr[1]) */
+			else {
+				uint64_t h;
+				int rc7 = hash_frame_n(tmp, 7, &h);
+				if (rc7 == 0 && h == ref7) printf("ok[seekpts]: non-monotone seek points rejected, frame 7 correct\n");
+				else { printf("FAIL[seekpts]: corrupt seek points trusted (frame 7 wrong/unreadable, rc=%d)\n", rc7); ok = 0; }
+			}
 		}
 	}
 

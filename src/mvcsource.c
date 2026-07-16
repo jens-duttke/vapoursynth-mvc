@@ -222,8 +222,18 @@ static int load_index_cache(MvcSource *s, const char *cpath, uint64_t src_size, 
 		if (fread(poff, sizeof *poff, h.nps, f) != (size_t)h.nps ||
 		    fread(plen, sizeof *plen, h.nps, f) != (size_t)h.nps) goto done;
 	}
+	/* Validate the seek points as well as their byte offsets: seek_to binary-searches
+	 * idx[].frame assuming it is in range and strictly increasing (one per IDR, in
+	 * display order). A corrupt/hostile ifr[] that is negative, >= num_pics, or
+	 * non-monotone would make the search pick a seek point whose frame index is
+	 * inconsistent with the picture its offset points at, so a seek lands on the
+	 * wrong display position and the clip serves the wrong frame. Reject the cache
+	 * (fall back to a fresh scan) on any such value. */
+	int prev_frame = -1;
 	for (int i = 0; i < h.nidx; i++) {
 		if (ioff[i] < 0 || (uint64_t)ioff[i] >= src_size) goto done;
+		if (ifr[i] <= prev_frame || ifr[i] >= h.num_pics) goto done; /* out of range or non-monotone */
+		prev_frame = ifr[i];
 		idx[i].nal = s->map + ioff[i];
 		idx[i].frame = ifr[i];
 	}
