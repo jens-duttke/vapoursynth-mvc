@@ -29,7 +29,7 @@ env:
   # edge264-mvc ref to build against; pinned to a release tag for reproducibility
   # (git clone --depth 1 --branch accepts tags/branches but NOT commit SHAs, so a
   # tag is required here). Bump when validating against a newer edge264-mvc.
-  EDGE264_REF: v2026.07.13
+  EDGE264_REF: v2026.07.16
   # AviSynth+ release to build the avisynth job against; pinned for reproducibility
   # and kept in sync with the vendored include/avisynth*.h headers. Bump both together.
   AVSPLUS_REF: v3.7.3

@@ -127,7 +127,7 @@ make EDGE264_SRC=/path/to/edge264-mvc     # builds both plugins + the core tests
 
 Individual targets: `make libvsmvc.so` (VapourSynth), `make libavsmvc.so`
 (AviSynth+). Tested on Linux; CI builds and bit-exact-verifies both plugins
-against edge264-mvc `v2026.07.13` and AviSynth+ `v3.7.3`.
+against edge264-mvc `v2026.07.16` and AviSynth+ `v3.7.3`.
 
 The **released** binaries target a portable `x86-64-v2` floor (SSE4.2, runs on
 ~2009-and-later CPUs), with edge264's runtime dispatch lifting the parser to AVX2
