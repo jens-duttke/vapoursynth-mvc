@@ -9,6 +9,8 @@
 /poctest
 /stalltest
 /cachetest
+/budgettest
+/budgettest32
 /avsnulltest
 *.o
 *.a

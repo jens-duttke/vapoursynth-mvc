@@ -3,6 +3,7 @@
  * Copyright (c) 2026 Jens Duttke. BSD-3-Clause (see LICENSE).
  */
 #include "mvcsource.h"
+#include "cache_budget.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -44,18 +45,13 @@ typedef struct {
 	Edge264Frame frame;  /* view over buf: samples/samples_mvc + packed strides */
 } FrameSlot;
 
-/* Decoded-frame cache budget (default and clamps). The cache is a ring of the
- * most recently produced pictures; a Reverse() / backward pass over a GOP is
- * served from it instead of re-decoding from the preceding IDR, so a larger
- * budget spans more of a long GOP and triggers fewer re-seeks (the dominant cost
- * of backward access on a 3D Blu-ray, whose IDR spacing can exceed 600 frames).
- * The default matches the order of magnitude other frameserver sources cache
- * (BestSource defaults ~1 GB); it is a ceiling, not an up-front reservation, as
- * slot buffers are allocated lazily. MAX_SLOTS is high enough that the byte
- * budget, not the slot count, is the real limit for normal frame sizes. */
-#define DEFAULT_FRAME_CACHE_MB 512
-#define MIN_FRAME_CACHE_MB 16
-#define MAX_FRAME_CACHE_MB 16384
+/* Decoded-frame cache: a ring of the most recently produced pictures, so a
+ * Reverse() / backward pass over a GOP is served from RAM instead of re-decoding
+ * from the preceding IDR (the dominant cost of backward access on a 3D Blu-ray,
+ * whose IDR spacing can exceed 600 frames). The byte budget (cache_budget.h) is a
+ * ceiling, not an up-front reservation - slot buffers are allocated lazily - and
+ * MAX_SLOTS is high enough that the byte budget, not the slot count, is the real
+ * limit for normal frame sizes. */
 #define FRAME_CACHE_MAX_SLOTS 4096
 
 struct MvcSource {
@@ -639,11 +635,8 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
 	MvcSource *s = calloc(1, sizeof *s);
 	if (!s) { set_err(err, errsize, "out of memory"); return NULL; }
 	s->n_threads = n_threads;
-	/* clamp the cache budget; <= 0 selects the default (see ring_init) */
-	int mb = cachesize_mb > 0 ? cachesize_mb : DEFAULT_FRAME_CACHE_MB;
-	if (mb < MIN_FRAME_CACHE_MB) mb = MIN_FRAME_CACHE_MB;
-	if (mb > MAX_FRAME_CACHE_MB) mb = MAX_FRAME_CACHE_MB;
-	s->cache_budget = (size_t)mb << 20;
+	/* clamp the cache budget; <= 0 selects the default (see cache_budget_bytes) */
+	s->cache_budget = cache_budget_bytes(cachesize_mb);
 	s->swaplr = swaplr != 0;
 
 	int64_t src_mtime = 0;
