@@ -44,11 +44,19 @@ typedef struct {
 	Edge264Frame frame;  /* view over buf: samples/samples_mvc + packed strides */
 } FrameSlot;
 
-/* Decoded-frame cache budget: as many slots as fit ~128 MB (BestSource's
- * cachesize default is 100 MB), so a whole I-frame span (~20 frames on a 3D
- * Blu-ray) is cached and a Reverse() / backward pass decodes each span once. */
-#define FRAME_CACHE_BUDGET_BYTES (128u << 20)
-#define FRAME_CACHE_MAX_SLOTS 64
+/* Decoded-frame cache budget (default and clamps). The cache is a ring of the
+ * most recently produced pictures; a Reverse() / backward pass over a GOP is
+ * served from it instead of re-decoding from the preceding IDR, so a larger
+ * budget spans more of a long GOP and triggers fewer re-seeks (the dominant cost
+ * of backward access on a 3D Blu-ray, whose IDR spacing can exceed 600 frames).
+ * The default matches the order of magnitude other frameserver sources cache
+ * (BestSource defaults ~1 GB); it is a ceiling, not an up-front reservation, as
+ * slot buffers are allocated lazily. MAX_SLOTS is high enough that the byte
+ * budget, not the slot count, is the real limit for normal frame sizes. */
+#define DEFAULT_FRAME_CACHE_MB 512
+#define MIN_FRAME_CACHE_MB 16
+#define MAX_FRAME_CACHE_MB 16384
+#define FRAME_CACHE_MAX_SLOTS 4096
 
 struct MvcSource {
 	uint8_t *map;          /* mapped file base (see map_file_ro), or NULL */
@@ -56,6 +64,7 @@ struct MvcSource {
 	const uint8_t *start;  /* first NAL (past the leading start code) */
 	const uint8_t *end;    /* one past the last byte */
 	int n_threads;
+	size_t cache_budget;   /* decoded-frame cache ceiling in bytes (see ring_init) */
 	int swaplr;            /* emit the two views swapped (base <-> dependent) */
 	int num_pics;          /* decoded source pictures (base primary); the output
 	                          frame count is 2x this for MVC_ALT */
@@ -474,12 +483,14 @@ static size_t slot_bytes(const Edge264Frame *f) {
 	return f->samples_mvc[0] ? 2 * one : one;
 }
 
-/* Size the ring from the first decoded frame: as many slots as fit the memory
- * budget, clamped to [2, MAX]. Buffers are allocated lazily by ring_store.
- * Returns 0, or -1 on allocation failure. */
+/* Size the ring from the first decoded frame: as many slots as fit s->cache_budget,
+ * clamped to [2, MAX_SLOTS]. Buffers are allocated lazily by ring_store, so a
+ * large budget costs memory only for frames actually cached. Returns 0, or -1 on
+ * allocation failure. */
 static int ring_init(MvcSource *s, const Edge264Frame *f) {
 	size_t per = slot_bytes(f);
-	int cap = per ? (int)(FRAME_CACHE_BUDGET_BYTES / per) : FRAME_CACHE_MAX_SLOTS;
+	size_t budget = s->cache_budget ? s->cache_budget : ((size_t)DEFAULT_FRAME_CACHE_MB << 20);
+	int cap = per ? (int)(budget / per) : FRAME_CACHE_MAX_SLOTS;
 	if (cap < 2) cap = 2;
 	if (cap > FRAME_CACHE_MAX_SLOTS) cap = FRAME_CACHE_MAX_SLOTS;
 	s->slots = calloc((size_t)cap, sizeof *s->slots);
@@ -588,7 +599,7 @@ static void assemble_plane(const MvcSource *s, const Edge264Frame *f, int plane,
 const MvcInfo *mvc_info(const MvcSource *s) { return &s->info; }
 
 MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swaplr,
-	int64_t fps_num, int64_t fps_den, char *err, size_t errsize) {
+	int64_t fps_num, int64_t fps_den, int cachesize_mb, char *err, size_t errsize) {
 	if (layout < MVC_BASE || layout > MVC_ALT) { /* else assemble_plane's switch fills nothing */
 		set_err(err, errsize, "invalid layout");
 		return NULL;
@@ -596,6 +607,11 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
 	MvcSource *s = calloc(1, sizeof *s);
 	if (!s) { set_err(err, errsize, "out of memory"); return NULL; }
 	s->n_threads = n_threads;
+	/* clamp the cache budget; <= 0 selects the default (see ring_init) */
+	int mb = cachesize_mb > 0 ? cachesize_mb : DEFAULT_FRAME_CACHE_MB;
+	if (mb < MIN_FRAME_CACHE_MB) mb = MIN_FRAME_CACHE_MB;
+	if (mb > MAX_FRAME_CACHE_MB) mb = MAX_FRAME_CACHE_MB;
+	s->cache_budget = (size_t)mb << 20;
 	s->swaplr = swaplr != 0;
 
 	int64_t src_mtime = 0;

@@ -79,7 +79,7 @@ static void AVSC_CC mvc_cb_free_filter(AVS_FilterInfo *fi) {
 	mvc_close((MvcSource *)fi->user_data);
 }
 
-/* --- MVCSource(source[, stack, threads, fpsnum, fpsden, swaplr]) ----------- */
+/* --- MVCSource(source[, stack, threads, fpsnum, fpsden, swaplr, cachesize]) - */
 
 static AVS_Value AVSC_CC Create_MVCSource(AVS_ScriptEnvironment *env, AVS_Value args, void *user_data) {
 	(void)user_data;
@@ -95,8 +95,11 @@ static AVS_Value AVSC_CC Create_MVCSource(AVS_ScriptEnvironment *env, AVS_Value 
 		snprintf(buf, sizeof buf, "MVCSource: unknown stack mode '%s' (use base/right/tab/sbs/alt)", stack);
 		return avs_new_value_error(avs_save_string(env, buf, -1));
 	}
+	/* threads: edge264 internal decode parallelism. Default -1 (auto-detect cores):
+	 * this filter reports MVC_MT_SERIALIZED, so GetFrame is serialised and internal
+	 * MT is safe, bit-exact, and speeds up a seek's forward re-decode. 0 = single. */
 	AVS_Value a_threads = avs_array_elt(args, 2);
-	int threads = avs_defined(a_threads) ? avs_as_int(a_threads) : 0;
+	int threads = avs_defined(a_threads) ? avs_as_int(a_threads) : -1;
 	/* fpsnum/fpsden are a pair: reject a half-specified or non-positive rate
 	 * rather than splice a user value with half of the default. Only both-absent
 	 * reaches mvc_open as 0/0, which keeps its 24000/1001 default. */
@@ -111,9 +114,13 @@ static AVS_Value AVSC_CC Create_MVCSource(AVS_ScriptEnvironment *env, AVS_Value 
 		return avs_new_value_error("MVCSource: fpsnum and fpsden must be positive");
 	AVS_Value a_swaplr = avs_array_elt(args, 5);
 	int swaplr = (avs_defined(a_swaplr) && avs_as_bool(a_swaplr)) ? 1 : 0;
+	/* cachesize: decoded-frame cache ceiling in MiB (0/absent = core default).
+	 * Larger = fewer re-seeks on a backward / Reverse() pass over a long GOP. */
+	AVS_Value a_cachesize = avs_array_elt(args, 6);
+	int cachesize = avs_defined(a_cachesize) ? avs_as_int(a_cachesize) : 0;
 
 	char emsg[256];
-	MvcSource *src = mvc_open(source, threads, (MvcLayout)layout, swaplr, fpsnum, fpsden, emsg, sizeof emsg);
+	MvcSource *src = mvc_open(source, threads, (MvcLayout)layout, swaplr, fpsnum, fpsden, cachesize, emsg, sizeof emsg);
 	if (!src) {
 		char buf[320];
 		snprintf(buf, sizeof buf, "MVCSource: %s", emsg);
@@ -159,7 +166,7 @@ static AVS_Value AVSC_CC Create_MVCSource(AVS_ScriptEnvironment *env, AVS_Value 
 
 MVC_PLUGIN_EXPORT const char *AVSC_CC avisynth_c_plugin_init(AVS_ScriptEnvironment *env) {
 	avs_add_function(env, "MVCSource",
-		"[source]s[stack]s[threads]i[fpsnum]i[fpsden]i[swaplr]b",
+		"[source]s[stack]s[threads]i[fpsnum]i[fpsden]i[swaplr]b[cachesize]i",
 		Create_MVCSource, 0);
 	return "MVCSource: H.264 MVC (3D) and AVC source, built on edge264-mvc";
 }

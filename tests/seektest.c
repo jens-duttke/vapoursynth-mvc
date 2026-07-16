@@ -125,14 +125,17 @@ static char *write_temp(const uint8_t *p, size_t n) {
 	return strdup(tmpl);
 }
 
-/* Reading every frame in reverse must equal reading it in sequence. Returns 0
- * on success, non-zero on the first mismatch/error. */
-static int check_seek_consistency(const char *label, const uint8_t *stream, size_t n) {
+/* Reading every frame in reverse must equal reading it in sequence. cachesize_mb
+ * exercises the decoded-frame-cache sizing (0 = default; a small value drives a
+ * smaller ring, so the reverse pass re-seeks more and the eviction path is hit
+ * on any stream with more frames than the ring holds). Returns 0 on success,
+ * non-zero on the first mismatch/error. */
+static int check_seek_consistency_cache(const char *label, const uint8_t *stream, size_t n, int cachesize_mb) {
 	char *path = write_temp(stream, n);
 	if (!path) { printf("FAIL[%s]: cannot write temp file\n", label); return 1; }
 
 	char err[256] = "";
-	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, err, sizeof err);
+	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, cachesize_mb, err, sizeof err);
 	if (!s) { printf("FAIL[%s]: open failed: %s\n", label, err); unlink(path); free(path); return 1; }
 	const MvcInfo *in = mvc_info(s);
 	int W = in->width, H = in->height, CW = W / 2, CH = H / 2, N = in->num_frames;
@@ -158,11 +161,17 @@ static int check_seek_consistency(const char *label, const uint8_t *stream, size
 			rc = 1; break;
 		}
 	}
-	if (!rc) printf("ok[%s]: %d frames, seek == sequential in reverse\n", label, N);
+	if (!rc) printf("ok[%s]: %d frames, seek == sequential in reverse (cachesize=%d)\n",
+	                label, N, cachesize_mb);
 
 	mvc_close(s); free(Y); free(U); free(V); free(ref);
 	unlink(path); free(path);
 	return rc;
+}
+
+/* Default-cache seek==sequential (the common case). */
+static int check_seek_consistency(const char *label, const uint8_t *stream, size_t n) {
+	return check_seek_consistency_cache(label, stream, n, 0);
 }
 
 /* Decode an entire stream (given as bytes) and store each frame's Y-plane hash.
@@ -172,7 +181,7 @@ static int decode_hashes(const char *label, const uint8_t *stream, size_t n,
 	char *path = write_temp(stream, n);
 	if (!path) { printf("FAIL[%s]: cannot write temp file\n", label); return -1; }
 	char err[256] = "";
-	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, err, sizeof err);
+	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, 0, err, sizeof err);
 	if (!s) { printf("FAIL[%s]: open failed: %s\n", label, err); unlink(path); free(path); return -1; }
 	const MvcInfo *in = mvc_info(s);
 	int W = in->width, H = in->height, CW = W / 2, CH = H / 2, N = in->num_frames;
@@ -232,6 +241,9 @@ int main(int argc, char **argv) {
 	int fail = 0;
 	/* the base stream (SPS/PPS per GOP) must already seek correctly */
 	fail |= check_seek_consistency("base", base, (size_t)n);
+	/* same stream, minimum cache: guards the cachesize plumbing + ring-cap sizing -
+	 * seek must stay bit-exact regardless of the cache budget */
+	fail |= check_seek_consistency_cache("base_mincache", base, (size_t)n, 16);
 
 	Buf hc = synth(base, (size_t)n, 0);   /* headerless GOP  -> P4-H-1 */
 	fail |= check_seek_consistency("headerless", hc.p, hc.len);

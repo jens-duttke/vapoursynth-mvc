@@ -39,7 +39,7 @@ int __wrap_edge264_decode_NAL(Edge264Decoder *dec, const uint8_t *buf,
 int main(int argc, char **argv) {
 	if (argc < 2) { fprintf(stderr, "usage: %s <base_multigop.264>\n", argv[0]); return 2; }
 	char err[256] = "";
-	MvcSource *s = mvc_open(argv[1], 0, MVC_BASE, 0, 0, 0, err, sizeof err); /* injection off during open */
+	MvcSource *s = mvc_open(argv[1], 0, MVC_BASE, 0, 0, 0, 0, err, sizeof err); /* injection off during open */
 	if (!s) { fprintf(stderr, "open failed: %s\n", err); return 2; }
 	const MvcInfo *in = mvc_info(s);
 	int W = in->width, H = in->height, CW = W / 2, CH = H / 2, N = in->num_frames;

@@ -30,11 +30,11 @@ int main(int argc, char **argv) {
 	 * frame the assemble switch never fills (garbage planes) */
 	{
 		char e2[256] = "";
-		MvcSource *bad = mvc_open(argv[1], 0, (MvcLayout)99, 0, 0, 0, e2, sizeof e2);
+		MvcSource *bad = mvc_open(argv[1], 0, (MvcLayout)99, 0, 0, 0, 0, e2, sizeof e2);
 		if (bad) { fprintf(stderr, "FAIL: mvc_open accepted invalid layout 99\n"); mvc_close(bad); return 1; }
 	}
 
-	MvcSource *s = mvc_open(argv[1], 0, layout, 0, 0, 0, err, sizeof err);
+	MvcSource *s = mvc_open(argv[1], 0, layout, 0, 0, 0, 0, err, sizeof err);
 	if (!s) { fprintf(stderr, "open failed: %s\n", err); return 1; }
 	const MvcInfo *in = mvc_info(s);
 

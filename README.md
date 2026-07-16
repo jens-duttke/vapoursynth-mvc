@@ -50,15 +50,21 @@ both hosts** (correct frame count, dimensions, frame-accurate seeking).
 - [x] **Random-access seeking + decoded-frame cache** - a seek decodes forward
   from the nearest preceding IDR (the only guaranteed H.264 random-access point:
   it resets the DPB, so a cold decode from it is bit-exact). A bounded
-  decoded-frame cache (~128 MB, modelled on BestSource's `cachesize`) holds
-  independent frame copies that survive a decoder reset, so backward / repeat /
-  `Reverse()` access is served from RAM (~0.2 ms) instead of re-decoding: AviSynth
-  `Reverse()` went from never displaying a frame to real-time playback, bit-exact.
-  Frame-accurate and bit-exact against a sequential decode across the full JVT
-  conformance corpus and on a real 3D Blu-ray. Note: on a stream with a very long
-  IDR spacing (some 3D Blu-rays run 600+ frames between IDRs), a cold seek into
-  the middle of such a GOP re-decodes from its IDR and can be slow; multithreaded
-  decode (`threads=-1`) and the frame cache absorb most of that in practice.
+  decoded-frame cache (`cachesize`, default 512 MiB, modelled on BestSource's
+  `cachesize`) holds independent frame copies that survive a decoder reset, so
+  backward / repeat / `Reverse()` access is served from RAM (~0.2 ms) instead of
+  re-decoding: AviSynth `Reverse()` went from never displaying a frame to
+  real-time playback, bit-exact. The cache also spans a long GOP, so a backward
+  pass triggers one cold re-decode per cache-window rather than one per frame -
+  the dominant cost of `Reverse()`. Frame-accurate and bit-exact against a
+  sequential decode across the full JVT conformance corpus and on real 3D
+  Blu-rays. Some 3D Blu-rays run 600+ frames between IDRs, and a cold seek into
+  such a GOP re-decodes from its IDR; multithreaded decode (`threads`, default
+  `-1`) makes that re-decode several times faster and a larger `cachesize` spans
+  the whole GOP so subsequent nearby seeks are cache hits. Measured on a real
+  multi-thousand-frame 3D Blu-ray, a backward pass near the end sped up roughly
+  20x at the defaults over the previous single-thread / small-cache behaviour, and
+  more with a GOP-spanning `cachesize`.
 - [ ] VUI frame-rate auto-detection.
 
 ## Usage
@@ -86,7 +92,11 @@ clip = core.mvc.Source(r"movie.264", stack="tab")
 # ... interpolate to 60000/1001 with vs-rife, then output/encode ...
 ```
 
-Signature: `core.mvc.Source(source, stack="base", threads=0, fpsnum=..., fpsden=..., swaplr=0)`.
+Signature: `core.mvc.Source(source, stack="base", threads=-1, fpsnum=..., fpsden=..., swaplr=0, cachesize=512)`.
+`threads` is edge264's internal decode parallelism (`-1` auto-detect cores, `0`
+single-thread, or an explicit count); `cachesize` is the decoded-frame cache
+ceiling in MiB (raise it for smoother backward / `Reverse()` seeking on
+long-GOP streams, lower it to save memory).
 
 ### AviSynth+
 
@@ -97,7 +107,8 @@ LoadPlugin("/path/to/libavsmvc.so")
 MVCSource("movie.264", stack="tab")
 ```
 
-Signature: `MVCSource(source, stack="base", threads=0, fpsnum=..., fpsden=..., swaplr=false)`.
+Signature: `MVCSource(source, stack="base", threads=-1, fpsnum=..., fpsden=..., swaplr=false, cachesize=512)`.
+`threads` and `cachesize` behave as for the VapourSynth signature above.
 
 `fpsnum`/`fpsden` must be given together (edge264's public API does not expose
 the VUI rate); the default is 24000/1001.

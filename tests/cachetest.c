@@ -48,7 +48,7 @@ static uint64_t fnv_plane(const uint8_t *p, ptrdiff_t stride, int w, int h) {
  * Returns 0 on success, -1 on any error. */
 static int hash_frames(const char *path, uint64_t out[NF]) {
 	char err[256] = "";
-	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, err, sizeof err);
+	MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, 0, err, sizeof err);
 	if (!s) { fprintf(stderr, "  open failed: %s\n", err); return -1; }
 	const MvcInfo *in = mvc_info(s);
 	int W = in->width, H = in->height, CW = W / 2, CH = H / 2;

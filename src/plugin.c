@@ -80,8 +80,16 @@ static void VS_CC vs_source_create(const VSMap *in, VSMap *out, void *userData,
 	 * nonzero value means on; mvc_open normalises it. */
 	int swaplr = vsapi->mapGetIntSaturated(in, "swaplr", 0, &e);
 	if (e) swaplr = 0;
+	/* threads: edge264 internal decode parallelism. Default -1 (auto-detect cores):
+	 * getFrame is serialised for this node (fmUnordered), so internal MT is safe,
+	 * bit-exact, and makes a seek's forward re-decode several times faster. Pass 0
+	 * for single-thread, or an explicit count. */
 	int threads = vsapi->mapGetIntSaturated(in, "threads", 0, &e);
-	if (e) threads = 0;
+	if (e) threads = -1;
+	/* cachesize: decoded-frame cache ceiling in MiB (0 = core default). Larger =
+	 * fewer re-seeks on a backward / Reverse() pass over a long GOP. */
+	int cachesize = vsapi->mapGetIntSaturated(in, "cachesize", 0, &e);
+	if (e) cachesize = 0;
 	/* fpsnum/fpsden are a pair: an unset key sets e (peUnset). Treat them
 	 * atomically - reject a half-specified or non-positive rate rather than
 	 * splice a user value with half of the default (e.g. fpsnum=25 -> 25/1001).
@@ -101,7 +109,7 @@ static void VS_CC vs_source_create(const VSMap *in, VSMap *out, void *userData,
 	if (!have_num) { fpsnum = 0; fpsden = 0; }
 
 	char emsg[256];
-	MvcSource *src = mvc_open(source, threads, (MvcLayout)layout, swaplr, fpsnum, fpsden, emsg, sizeof emsg);
+	MvcSource *src = mvc_open(source, threads, (MvcLayout)layout, swaplr, fpsnum, fpsden, cachesize, emsg, sizeof emsg);
 	if (!src) {
 		char buf[320];
 		snprintf(buf, sizeof buf, "mvc.Source: %s", emsg);
@@ -141,10 +149,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
 	vspapi->configPlugin("de.duttke.mvc", "mvc",
 		"H.264 MVC (3D) and AVC source, built on edge264-mvc",
 		VS_MAKE_VERSION(0, 4), VAPOURSYNTH_API_VERSION, 0, plugin);
-	/* swaplr is appended after the v0.1.0 argument set so existing positional
-	 * calls (threads/fpsnum/fpsden) keep their indices. */
+	/* New optional args are appended so existing positional calls keep their
+	 * indices (swaplr after the v0.1.0 set, cachesize after that). */
 	vspapi->registerFunction("Source",
-		"source:data;stack:data:opt;threads:int:opt;fpsnum:int:opt;fpsden:int:opt;swaplr:int:opt;",
+		"source:data;stack:data:opt;threads:int:opt;fpsnum:int:opt;fpsden:int:opt;swaplr:int:opt;cachesize:int:opt;",
 		"clip:vnode;",
 		vs_source_create, NULL, plugin);
 }

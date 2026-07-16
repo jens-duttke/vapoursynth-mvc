@@ -44,11 +44,20 @@ typedef struct {
  * a stream authored right-eye-first without changing the layout. fps is only a
  * hint written to the info (edge264's public API does not expose the VUI); pass
  * 0/0 to keep the default 24000/1001. MVC_ALT interleaves the two views into one
- * clip, so it reports twice the frame count and twice the frame rate. Returns
- * NULL on failure and writes a message to err (if err != NULL).
+ * clip, so it reports twice the frame count and twice the frame rate.
+ *
+ * cachesize_mb bounds the decoded-frame cache (MiB); <= 0 selects the default.
+ * The cache holds the most recently produced pictures, so backward / repeat /
+ * Reverse() access is served from RAM instead of re-decoding from the preceding
+ * IDR. A larger cache spans more of a long GOP, so a backward pass triggers fewer
+ * re-seeks (the pathological Reverse() cost); a smaller one trades that for less
+ * memory. Buffers are allocated lazily, so the budget is a ceiling, not an
+ * up-front reservation.
+ *
+ * Returns NULL on failure and writes a message to err (if err != NULL).
  */
 MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swaplr,
-	int64_t fps_num, int64_t fps_den, char *err, size_t errsize);
+	int64_t fps_num, int64_t fps_den, int cachesize_mb, char *err, size_t errsize);
 
 const MvcInfo *mvc_info(const MvcSource *s);
 
