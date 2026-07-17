@@ -24,11 +24,25 @@
  *                sequential, and num_frames is an exact frame-suffix of the full
  *                stream.
  *
+ * A second committed fixture covers open GOPs, which the multi-GOP one cannot:
+ *
+ *   opengop    : recovery-point access units (a non-IDR I picture behind a
+ *                recovery_point SEI), the entry points a 3D Blu-ray puts between
+ *                its far rarer IDRs, and the only reason a seek there is cheap.
+ *                Their leading pictures follow them in decode order but precede
+ *                them in display order, so a seek point there is only usable with
+ *                the POC-derived display index that tells the two apart. Getting
+ *                that wrong serves a leading picture decoded without its
+ *                references - a wrong frame at every recovery point, which is the
+ *                regression v0.4.3 shipped. The minimum-cache variant is the sharp
+ *                one: it shrinks the frame cache until nearly every reverse read
+ *                is a cold seek onto a recovery point.
+ *
  * The check is the project's core invariant: reading a frame after a seek must
  * be bit-identical to reading it in sequence. Reading every frame in reverse
  * order forces a backward seek onto each seek point in turn.
  *
- * usage: seektest <base_multigop.264>
+ * usage: seektest <base_multigop.264> [base_opengop.264]
  *
  * Copyright (c) 2026 Jens Duttke. BSD-3-Clause (see LICENSE).
  */
@@ -174,6 +188,7 @@ static int check_seek_consistency(const char *label, const uint8_t *stream, size
 	return check_seek_consistency_cache(label, stream, n, 0);
 }
 
+
 /* Decode an entire stream (given as bytes) and store each frame's Y-plane hash.
  * Returns the frame count, or -1 on error / if it exceeds `cap` (message printed). */
 static int decode_hashes(const char *label, const uint8_t *stream, size_t n,
@@ -195,6 +210,55 @@ static int decode_hashes(const char *label, const uint8_t *stream, size_t n,
 		h[i] = hashp(Y, W, W, H);
 	}
 	mvc_close(s); free(Y); free(U); free(V); unlink(path); free(path);
+	return rc;
+}
+
+/*
+ * Cold random access: read each frame from a FRESH source, so every read really
+ * does seek to the nearest random-access point and decode forward to it.
+ *
+ * Reading in reverse from one source does NOT do that, however much it looks like
+ * it: the sequential pass that builds the reference leaves every frame of a small
+ * fixture in the decoded-frame cache (its floor is 16 MiB - thousands of 64x64
+ * pictures), so the reverse pass is served entirely from RAM and exercises the
+ * cache instead of the seek. A fresh source per frame is the only way to put the
+ * seek path itself under test, and an open-GOP fixture needs exactly that: a
+ * recovery point's leading pictures are only ever emitted on a cold decode, so
+ * serving one in place of the recovery point is invisible to a cached read.
+ */
+static int check_cold_seek(const char *label, const uint8_t *stream, size_t n) {
+	enum { CAP = 256 };
+	uint64_t ref[CAP];
+	int N = decode_hashes(label, stream, n, ref, CAP);
+	if (N < 0) return 1;
+
+	char *path = write_temp(stream, n);
+	if (!path) { printf("FAIL[%s]: cannot write temp file\n", label); return 1; }
+	int rc = 0;
+	for (int i = N - 1; i >= 0 && !rc; i--) {
+		char err[256] = "";
+		MvcSource *s = mvc_open(path, 0, MVC_BASE, 0, 0, 0, 0, err, sizeof err);
+		if (!s) { printf("FAIL[%s]: open failed: %s\n", label, err); rc = 1; break; }
+		const MvcInfo *in = mvc_info(s);
+		int W = in->width, H = in->height, CW = W / 2, CH = H / 2;
+		uint8_t *Y = malloc((size_t)W * H), *U = malloc((size_t)CW * CH), *V = malloc((size_t)CW * CH);
+		if (!Y || !U || !V) { printf("FAIL[%s]: oom\n", label); rc = 1; }
+		else if (mvc_get_frame(s, i, Y, W, U, CW, V, CW, err, sizeof err)) {
+			printf("FAIL[%s]: cold seek to frame %d errored: %s\n", label, i, err); rc = 1;
+		} else {
+			uint64_t h = hashp(Y, W, W, H);
+			if (h != ref[i]) {
+				printf("FAIL[%s]: cold seek to frame %d returned WRONG content (%016llx != %016llx)"
+				       " - a recovery point's leading picture served in its place?\n",
+				       label, i, (unsigned long long)h, (unsigned long long)ref[i]);
+				rc = 1;
+			}
+		}
+		free(Y); free(U); free(V);
+		mvc_close(s);
+	}
+	if (!rc) printf("ok[%s]: %d frames, every frame cold-seeked == sequential\n", label, N);
+	unlink(path); free(path);
 	return rc;
 }
 
@@ -229,14 +293,27 @@ static int check_cut_count(const uint8_t *base, size_t n, size_t coff) {
 	return 0;
 }
 
-int main(int argc, char **argv) {
-	if (argc < 2) { fprintf(stderr, "usage: %s <base_multigop.264>\n", argv[0]); return 2; }
-	FILE *f = fopen(argv[1], "rb");
-	if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
+/* Slurp a file into a fresh buffer; returns NULL (message printed) on failure. */
+static uint8_t *read_file(const char *path, size_t *len) {
+	FILE *f = fopen(path, "rb");
+	if (!f) { fprintf(stderr, "cannot open %s\n", path); return NULL; }
 	fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-	uint8_t *base = malloc((size_t)n);
-	if (fread(base, 1, (size_t)n, f) != (size_t)n) { fprintf(stderr, "read error\n"); return 2; }
+	uint8_t *b = (n > 0) ? malloc((size_t)n) : NULL;
+	if (!b || fread(b, 1, (size_t)n, f) != (size_t)n) {
+		fprintf(stderr, "read error on %s\n", path);
+		free(b); fclose(f); return NULL;
+	}
 	fclose(f);
+	*len = (size_t)n;
+	return b;
+}
+
+int main(int argc, char **argv) {
+	if (argc < 2) { fprintf(stderr, "usage: %s <base_multigop.264> [base_opengop.264]\n", argv[0]); return 2; }
+	size_t nn = 0;
+	uint8_t *base = read_file(argv[1], &nn);
+	if (!base) return 2;
+	long n = (long)nn;
 
 	int fail = 0;
 	/* the base stream (SPS/PPS per GOP) must already seek correctly */
@@ -262,6 +339,19 @@ int main(int argc, char **argv) {
 	}
 
 	free(base);
+
+	/* Open GOPs: seek points sit on recovery points, whose leading pictures must be
+	 * decoded and discarded rather than served. Only the cold-seek check can see
+	 * that - a cached reverse read never reaches the seek path at all. */
+	if (argc > 2) {
+		size_t ogn = 0;
+		uint8_t *og = read_file(argv[2], &ogn);
+		if (!og) return 2;
+		fail |= check_seek_consistency("opengop", og, ogn);
+		fail |= check_cold_seek("opengop_cold", og, ogn);
+		free(og);
+	}
+
 	printf(fail ? "RESULT: FAIL\n" : "RESULT: PASS\n");
 	return fail;
 }

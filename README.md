@@ -47,24 +47,31 @@ both hosts** (correct frame count, dimensions, frame-accurate seeking).
   bit-identical output. Writing is best-effort (a read-only directory simply
   means no cache, never a failed open); a stale or corrupt sidecar is detected
   and a fresh scan runs.
-- [x] **Random-access seeking + decoded-frame cache** - a seek decodes forward
-  from the nearest preceding IDR (the only guaranteed H.264 random-access point:
-  it resets the DPB, so a cold decode from it is bit-exact). A bounded
-  decoded-frame cache (`cachesize`, default 512 MiB, modelled on BestSource's
-  `cachesize`) holds independent frame copies that survive a decoder reset, so
-  backward / repeat / `Reverse()` access is served from RAM (~0.2 ms) instead of
-  re-decoding: AviSynth `Reverse()` went from never displaying a frame to
-  real-time playback, bit-exact. The cache also spans a long GOP, so a backward
-  pass triggers one cold re-decode per cache-window rather than one per frame -
-  the dominant cost of `Reverse()`. Frame-accurate and bit-exact against a
-  sequential decode across the full JVT conformance corpus and on real 3D
-  Blu-rays. Some 3D Blu-rays run 600+ frames between IDRs, and a cold seek into
-  such a GOP re-decodes from its IDR; multithreaded decode (`threads`, default
-  `-1`) makes that re-decode several times faster and a larger `cachesize` spans
-  the whole GOP so subsequent nearby seeks are cache hits. Measured on a real
-  multi-thousand-frame 3D Blu-ray, a backward pass near the end sped up roughly
-  20x at the defaults over the previous single-thread / small-cache behaviour, and
-  more with a GOP-spanning `cachesize`.
+- [x] **Random-access seeking on every recovery point + decoded-frame cache** - a
+  seek decodes forward from the nearest preceding random-access point. Those are
+  not only IDRs: an open-GOP **recovery point** (a non-IDR I picture behind a
+  `recovery_point` SEI) is one too, and it is the entry point a 3D Blu-ray
+  actually uses - on a real disc, 341 of them against 103 IDRs over 7514 pictures,
+  cutting the worst-case span a cold seek must re-decode from **787 frames to 20**.
+  Using them needs the recovery point's display index, which is not its decode
+  index: its *leading pictures* follow it in decode order but precede it in
+  display order and reference the previous GOP, so a cold decode emits them, wrong,
+  before the recovery point itself. The scan therefore derives the picture order
+  count from the slice headers (no pixel decoding) and records, per seek point,
+  both the first display index a cold decode there yields and the first one that is
+  correct; the leading pictures in between are decoded and discarded, never cached
+  or served. A stream the POC derivation cannot model (field coding, an MMCO5 POC
+  reset) falls back to IDR-only seek points - slower on a long GOP, never wrong.
+  A bounded decoded-frame cache (`cachesize`, default 512 MiB, modelled on
+  BestSource's `cachesize`) holds independent frame copies that survive a decoder
+  reset, so backward / repeat / `Reverse()` access is served from RAM (~0.2 ms)
+  instead of re-decoding at all. Frame-accurate and bit-exact against a sequential
+  decode across the full JVT conformance corpus and on real 3D Blu-rays. Measured
+  on a 7514-picture 3D Blu-ray at the defaults: a cold seek to the last frame
+  dropped from 4.25 s to 0.41 s, a `Reverse()` pass from 51.9 to ~155 fps, and the
+  worst single-frame stall - what a user perceives as a hang - from 2.21 s to
+  0.19 s. The gain is stream-dependent: a disc authored without recovery points
+  (one sample here) has no entry points between its IDRs and is unchanged.
 - [ ] VUI frame-rate auto-detection.
 
 ## Usage

@@ -129,7 +129,7 @@ mockhost-asan: tests/mockhost.c
 
 # Random-access seek regression test on headerless-GOP / AUD-headed topologies
 # (uses a committed fixture, so it needs no TEST_FILE and no encoder).
-seektest: tests/seektest.c src/mvcsource.c src/mvcsource.h $(EDGE264_A)
+seektest: tests/seektest.c src/mvcsource.c src/mvcsource.h src/h264poc.h $(EDGE264_A)
 	$(CC) $(CFLAGS) $(INCLUDES) tests/seektest.c src/mvcsource.c $(EDGE264_A) -pthread -o $@
 
 # ENOMEM-handling test: --wrap intercepts edge264_decode_NAL to inject ENOMEM on
@@ -184,8 +184,8 @@ budgettest: tests/budgettest.c src/cache_budget.h
 check: coretest mockhost mockhost-asan seektest enomemtest allocfailtest poctest stalltest cachetest budgettest avsnulltest $(PLUGIN) $(AVS_PLUGIN)
 	@echo "== makefile behaviour (edge264 sub-make always delegated) =="
 	sh tests/mkcheck.sh "$(EDGE264_SRC)"
-	@echo "== seek regression (headerless-GOP / AUD-headed, committed fixture) =="
-	./seektest tests/fixtures/base_multigop.264
+	@echo "== seek regression (headerless-GOP / AUD-headed / open-GOP, committed fixtures) =="
+	./seektest tests/fixtures/base_multigop.264 tests/fixtures/base_opengop.264
 	@echo "== ENOMEM handling (injected via --wrap) =="
 	./enomemtest tests/fixtures/base_multigop.264
 	@echo "== decoder alloc-failure handling (injected via --wrap) =="

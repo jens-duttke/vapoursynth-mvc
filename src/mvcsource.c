@@ -4,6 +4,7 @@
  */
 #include "mvcsource.h"
 #include "cache_budget.h"
+#include "h264poc.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -21,11 +22,32 @@
 
 #include "edge264.h"
 
-/* A random-access seek point: an IDR access unit and the display index of the
- * first frame it produces. `nal` points at the start of the access unit's
- * leading NALs (AUD/SPS/PPS...), so re-feeding from here re-establishes the
- * parameter sets before the IDR. */
-typedef struct { const uint8_t *nal; int frame; } SeekPoint;
+/*
+ * A random-access point to seek to: an IDR, or an open-GOP recovery point (a
+ * non-IDR I picture carrying a recovery_point SEI - what Blu-ray uses for entry
+ * points between IDRs). `nal` points at the start of the access unit's leading
+ * NALs (AUD/SPS/PPS...), so re-feeding from here re-establishes the parameter
+ * sets before the picture.
+ *
+ * The two indices differ only at an open-GOP recovery point, and the difference
+ * is the whole reason this type is not just an offset + a number:
+ *
+ *   frame      display index of the FIRST picture a cold decode here yields.
+ *   valid_from display index of the first picture that is guaranteed CORRECT.
+ *
+ * At an IDR they are equal: it resets the DPB, so its own picture comes out
+ * first. At a recovery point they are not. Its leading pictures follow it in
+ * decode order but precede it in display order and reference the previous GOP,
+ * which a cold decode has not seen - so the decoder emits (valid_from - frame)
+ * wrong pictures before reaching the recovery point itself. Those must be
+ * decoded (they carry no useful output but the decoder produces them) and then
+ * discarded, never cached or served. valid_from is the recovery point's own
+ * display index, derived from the picture order count during the scan; it is
+ * what a seek binary-searches on, and what makes a recovery point a usable seek
+ * target at all. Measured on a real 3D Blu-ray: 341 recovery points vs 103 IDRs,
+ * and a cold decode from every one of them lands bit-exact on valid_from.
+ */
+typedef struct { const uint8_t *nal; int frame, valid_from; } SeekPoint;
 
 /* A parameter-set NAL (SPS / PPS / subset-SPS) span in the mapped stream, in the
  * order it appears. On a seek the decoder is torn down and recreated, so the
@@ -75,6 +97,9 @@ struct MvcSource {
 	Edge264Decoder *dec;
 	const uint8_t *nal;    /* current feed position */
 	int next_out;          /* display index of the next frame get_frame will yield */
+	int valid_from;        /* display index from which this decode run's output is
+	                          correct: below it sit the leading pictures of the
+	                          recovery point we started at (see SeekPoint) */
 	int64_t last_poc;      /* DisplayPoc of the previous output in this run (INT64_MIN after a reset) */
 
 	/* Ring of recently decoded source pictures (independent copies), so backward /
@@ -164,7 +189,7 @@ static void unmap_file(uint8_t *p, size_t size) {
  * Machine-local artifact: written and read by the same build, so native field
  * sizes/order are fine (the magic gates any future format change).
  */
-#define MVCIDX_MAGIC "MVCIDX03" /* bump the trailing digits to invalidate old caches (03: seek points are IDR-only again - 02's non-IDR recovery-point seek points were unsafe on open GOPs) */
+#define MVCIDX_MAGIC "MVCIDX04" /* bump the trailing digits to invalidate old caches (04: seek points are back on every random-access point, now carrying the POC-derived valid_from that 02 lacked) */
 
 struct idx_hdr {
 	char     magic[8];   /* MVCIDX_MAGIC, no NUL */
@@ -187,7 +212,7 @@ static int load_index_cache(MvcSource *s, const char *cpath, uint64_t src_size, 
 	struct idx_hdr h;
 	int ok = 0;
 	int64_t *ioff = NULL, *poff = NULL, *plen = NULL;
-	int32_t *ifr = NULL;
+	int32_t *ifr = NULL, *ivf = NULL;
 	SeekPoint *idx = NULL;
 	ParamNal *ps = NULL;
 	if (fread(&h, sizeof h, 1, f) != 1)
@@ -205,10 +230,12 @@ static int load_index_cache(MvcSource *s, const char *cpath, uint64_t src_size, 
 	if (h.nidx) {
 		ioff = malloc((size_t)h.nidx * sizeof *ioff);
 		ifr = malloc((size_t)h.nidx * sizeof *ifr);
+		ivf = malloc((size_t)h.nidx * sizeof *ivf);
 		idx = malloc((size_t)h.nidx * sizeof *idx);
-		if (!ioff || !ifr || !idx) goto done;
+		if (!ioff || !ifr || !ivf || !idx) goto done;
 		if (fread(ioff, sizeof *ioff, h.nidx, f) != (size_t)h.nidx ||
-		    fread(ifr, sizeof *ifr, h.nidx, f) != (size_t)h.nidx) goto done;
+		    fread(ifr, sizeof *ifr, h.nidx, f) != (size_t)h.nidx ||
+		    fread(ivf, sizeof *ivf, h.nidx, f) != (size_t)h.nidx) goto done;
 	}
 	if (h.nps) {
 		poff = malloc((size_t)h.nps * sizeof *poff);
@@ -219,19 +246,26 @@ static int load_index_cache(MvcSource *s, const char *cpath, uint64_t src_size, 
 		    fread(plen, sizeof *plen, h.nps, f) != (size_t)h.nps) goto done;
 	}
 	/* Validate the seek points as well as their byte offsets: seek_to binary-searches
-	 * idx[].frame assuming it is in range and strictly increasing (one per IDR, in
-	 * display order). A corrupt/hostile ifr[] that is negative, >= num_pics, or
-	 * non-monotone would make the search pick a seek point whose frame index is
-	 * inconsistent with the picture its offset points at, so a seek lands on the
-	 * wrong display position and the clip serves the wrong frame. Reject the cache
-	 * (fall back to a fresh scan) on any such value. */
-	int prev_frame = -1;
+	 * idx[].valid_from assuming it is in range and strictly increasing, and trusts
+	 * idx[].frame as the display index the decoder's first output there carries. A
+	 * corrupt/hostile array that is negative, >= num_pics, or non-monotone would make
+	 * the search pick a seek point whose indices are inconsistent with the picture its
+	 * offset points at, so a seek lands on the wrong display position and the clip
+	 * serves the wrong frame. valid_from must additionally be >= frame, the invariant
+	 * the scan establishes (a recovery point's own display index is at or after the
+	 * first picture a cold decode there yields); a cache violating it would make
+	 * ensure_source_frame discard real frames or serve leading-picture garbage. Reject
+	 * the cache (fall back to a fresh scan) on any such value. */
+	int prev_frame = -1, prev_valid = -1;
 	for (int i = 0; i < h.nidx; i++) {
 		if (ioff[i] < 0 || (uint64_t)ioff[i] >= src_size) goto done;
 		if (ifr[i] <= prev_frame || ifr[i] >= h.num_pics) goto done; /* out of range or non-monotone */
+		if (ivf[i] < ifr[i] || ivf[i] <= prev_valid || ivf[i] >= h.num_pics) goto done;
 		prev_frame = ifr[i];
+		prev_valid = ivf[i];
 		idx[i].nal = s->map + ioff[i];
 		idx[i].frame = ifr[i];
+		idx[i].valid_from = ivf[i];
 	}
 	for (int i = 0; i < h.nps; i++) {
 		if (poff[i] < 0 || plen[i] < 0 || (uint64_t)poff[i] + (uint64_t)plen[i] > src_size) goto done;
@@ -244,7 +278,7 @@ static int load_index_cache(MvcSource *s, const char *cpath, uint64_t src_size, 
 	s->info.is_mvc = h.is_mvc;
 	ok = 1;
 done:
-	free(ioff); free(ifr); free(poff); free(plen);
+	free(ioff); free(ifr); free(ivf); free(poff); free(plen);
 	free(idx); free(ps); /* NULL after a successful transfer, so no double free */
 	fclose(f);
 	return ok;
@@ -268,6 +302,7 @@ static void save_index_cache(const MvcSource *s, const char *cpath, uint64_t src
 	int ok = fwrite(&h, sizeof h, 1, f) == 1;
 	for (int i = 0; i < s->nidx && ok; i++) { int64_t o = s->idx[i].nal - s->map; ok = fwrite(&o, sizeof o, 1, f) == 1; }
 	for (int i = 0; i < s->nidx && ok; i++) { int32_t r = s->idx[i].frame;        ok = fwrite(&r, sizeof r, 1, f) == 1; }
+	for (int i = 0; i < s->nidx && ok; i++) { int32_t v = s->idx[i].valid_from;   ok = fwrite(&v, sizeof v, 1, f) == 1; }
 	for (int i = 0; i < s->nps && ok; i++) { int64_t o = s->ps[i].nal - s->map;   ok = fwrite(&o, sizeof o, 1, f) == 1; }
 	for (int i = 0; i < s->nps && ok; i++) { int64_t l = s->ps[i].end - s->ps[i].nal; ok = fwrite(&l, sizeof l, 1, f) == 1; }
 	if (fclose(f) != 0) ok = 0;
@@ -285,6 +320,9 @@ static void idx_push(MvcSource *s, const uint8_t *nal, int frame) {
 	}
 	s->idx[s->nidx].nal = nal;
 	s->idx[s->nidx].frame = frame;
+	/* Correct as-is for an IDR (no leading pictures); flush_cvs refines it for an
+	 * open-GOP recovery point once that sequence's picture order counts are known. */
+	s->idx[s->nidx].valid_from = frame;
 	s->nidx++;
 }
 
@@ -300,13 +338,73 @@ static void ps_push(MvcSource *s, const uint8_t *nal, const uint8_t *end) {
 	s->nps++;
 }
 
+/* Picture order counts of the coded video sequence currently being scanned, in
+ * decode order. Only one sequence is held at a time (it is consumed at the next
+ * IDR), so this peaks at the longest IDR-to-IDR span, not the whole stream. */
+typedef struct { int32_t *v; int n, cap; } PocBuf;
+
+static int pocbuf_push(PocBuf *b, int32_t poc) {
+	if (b->n == b->cap) {
+		int cap = b->cap ? b->cap * 2 : 1024;
+		int32_t *v = realloc(b->v, (size_t)cap * sizeof *v);
+		if (!v) return -1;
+		b->v = v; b->cap = cap;
+	}
+	b->v[b->n++] = poc;
+	return 0;
+}
+
+static int cmp_i32(const void *a, const void *b) {
+	int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
+	return (x > y) - (x < y);
+}
+
+/*
+ * Turn the finished coded video sequence's decode-order POCs into display indices
+ * for the seek points recorded inside it (those from `first_sp` on). A sequence is
+ * output in increasing POC order, so a picture's display index is the rank of its
+ * POC within the sequence, offset by `base` - the display index of the sequence's
+ * first picture, which equals its decode index because no picture crosses an IDR
+ * in either order.
+ *
+ * Returns -1 if the POCs are not unique. That is the guard against a stream whose
+ * POC derivation h264poc.h does not model (MMCO5 resets the count mid-sequence,
+ * which collides with an earlier POC); the display map would be wrong, so the
+ * caller must fall back to IDR-only seek points instead of trusting it. Also -1 on
+ * allocation failure, which takes the same safe path.
+ */
+static int flush_cvs(MvcSource *s, const PocBuf *pb, int base, int first_sp) {
+	if (pb->n == 0)
+		return 0;
+	int32_t *sorted = malloc((size_t)pb->n * sizeof *sorted);
+	if (!sorted)
+		return -1;
+	memcpy(sorted, pb->v, (size_t)pb->n * sizeof *sorted);
+	qsort(sorted, (size_t)pb->n, sizeof *sorted, cmp_i32);
+	int ok = 1;
+	for (int i = 1; i < pb->n; i++)
+		if (sorted[i] == sorted[i - 1]) { ok = 0; break; }
+	for (int i = first_sp; ok && i < s->nidx; i++) {
+		int local = s->idx[i].frame - base; /* the seek point's decode index within this sequence */
+		int32_t poc = pb->v[local];
+		int lo = 0, hi = pb->n; /* rank = lower_bound(sorted, poc) */
+		while (lo < hi) {
+			int mid = (lo + hi) / 2;
+			if (sorted[mid] < poc) lo = mid + 1; else hi = mid;
+		}
+		s->idx[i].valid_from = base + lo;
+	}
+	free(sorted);
+	return ok ? 0 : -1;
+}
+
 /*
  * Single linear scan over the Annex-B NAL units to derive, without pixel
  * decoding: the number of output frames (= base primary coded pictures), the
- * presence of a dependent view, and one seek point per IDR. A base primary
- * picture is a type 1/5 NAL whose first_mb_in_slice == 0; ue(v)==0 is a single
- * '1' bit, so that is exactly the top bit of the first RBSP byte (emulation
- * prevention cannot affect the first byte).
+ * presence of a dependent view, and the seek points. A base primary picture is a
+ * type 1/5 NAL whose first_mb_in_slice == 0; ue(v)==0 is a single '1' bit, so
+ * that is exactly the top bit of the first RBSP byte (emulation prevention cannot
+ * affect the first byte).
  *
  * A base picture is only counted once a base-view SPS (type 7) and a PPS (type 8)
  * have appeared earlier in the stream. This mirrors the decoder, which returns
@@ -316,16 +414,36 @@ static void ps_push(MvcSource *s, const uint8_t *nal, const uint8_t *end) {
  * overcount num_frames - shifting every later display index and running past the
  * real frames at the end. Cleanly demuxed streams start with SPS/PPS/IDR, so the
  * guard is inert for them.
+ *
+ * With use_poc, the slice headers are also parsed for their picture order count
+ * (h264poc.h), which is what lets a seek point sit on an open-GOP recovery point
+ * and not just on an IDR - the difference between re-decoding ~20 frames and
+ * ~600 on a 3D Blu-ray. Returns -1 if that derivation cannot model the stream, so
+ * the caller can rerun without it; without use_poc only IDRs become seek points,
+ * where decode order and display order agree and no POC is needed.
  */
-static void scan_index(MvcSource *s) {
+static int scan_index_pass(MvcSource *s, int use_poc) {
 	const uint8_t *p = s->start, *end = s->end;
 	const uint8_t *au_start = s->start; /* start of the current access unit's leading NALs */
 	int in_vcl = 0;                     /* did we just pass this AU's VCL NALs? */
 	int frames = 0, is_mvc = 0;
 	int seen_sps = 0, seen_pps = 0;     /* a base-view SPS+PPS must precede a counted slice */
+	int recovery_seen = 0;              /* a recovery_point SEI is pending for the next picture */
+	int cvs_base = 0, cvs_first_sp = 0; /* start of the coded video sequence being scanned */
+	int rc = 0;
+	PocBuf pb = {0};
+	H264PocCtx *pc = NULL;
+	if (use_poc) {
+		pc = malloc(sizeof *pc); /* ~35 KB: too big for a frameserver worker's stack */
+		if (!pc)
+			return -1;
+		h264_poc_ctx_init(pc);
+	}
 	while (p < end) {
 		int type = p[0] & 0x1f;
 		int is_vcl = (type >= 1 && type <= 5) || type == 19 || type == 20;
+		const uint8_t *sc = edge264_find_start_code(p, end, 0);
+		const uint8_t *nend = sc < end ? sc : end;
 		if (!is_vcl && in_vcl) { au_start = p; in_vcl = 0; } /* leading NAL of the next AU */
 		if (type == 20 || type == 15)
 			is_mvc = 1;
@@ -333,9 +451,18 @@ static void scan_index(MvcSource *s) {
 			seen_sps = 1;
 		else if (type == 8)
 			seen_pps = 1;
-		if (type == 7 || type == 8 || type == 13 || type == 15) { /* SPS/PPS/SPS-ext/subset-SPS */
-			const uint8_t *sc = edge264_find_start_code(p, end, 0);
-			ps_push(s, p, sc < end ? sc : end);
+		if (type == 7 || type == 8 || type == 13 || type == 15) /* SPS/PPS/SPS-ext/subset-SPS */
+			ps_push(s, p, nend);
+		if (use_poc) {
+			/* Only the base SPS (7) feeds the POC parser, never the MVC subset SPS
+			 * (15): they share the id numbering but are distinct sets, so a subset
+			 * SPS would overwrite the base view's (see h264poc.h). */
+			if (type == 7)
+				h264_parse_sps(pc, p, nend);
+			else if (type == 8)
+				h264_parse_pps(pc, p, nend);
+			else if (type == 6 && h264_sei_is_recovery_point(p, nend))
+				recovery_seen = 1;
 		}
 		if ((type == 1 || type == 5) && (p + 1 < end) && (p[1] & 0x80) && seen_sps && seen_pps) { /* base primary picture */
 			/* If this AU begins directly with its VCL NAL (no leading non-VCL
@@ -344,25 +471,63 @@ static void scan_index(MvcSource *s) {
 			 * every later seek point records the wrong byte offset. */
 			if (in_vcl)
 				au_start = p;
-			/* Record a seek point at every IDR (type 5). An IDR is the only
-			 * guaranteed random-access point in H.264: it resets the DPB, so a
-			 * cold decode from it is bit-exact. A non-IDR I picture is NOT safe -
-			 * even when it carries a recovery_point SEI, an open-GOP recovery
-			 * point can have leading pictures that reference the previous GOP, so
-			 * a cold decode returns wrong frames for those display positions (and
-			 * the count of leading pictures is not knowable from a NAL scan). */
-			if (type == 5)
+			if (use_poc) {
+				H264PicInfo pi;
+				if (!h264_parse_picture(pc, p, nend, &pi)) { rc = -1; goto out; }
+				if (pi.is_idr) { /* an IDR ends the previous sequence and starts a new one */
+					if (flush_cvs(s, &pb, cvs_base, cvs_first_sp) < 0) { rc = -1; goto out; }
+					pb.n = 0;
+					cvs_base = frames;
+					cvs_first_sp = s->nidx;
+					h264_poc_reset(pc);
+				}
+				if (pocbuf_push(&pb, pi.poc) < 0) { rc = -1; goto out; }
+				/* Every random-access point becomes a seek point: an IDR, or an
+				 * I picture preceded by a recovery_point SEI (an exact open-GOP
+				 * entry point, which is what a 3D Blu-ray puts between its far
+				 * rarer IDRs). flush_cvs fills in the recovery point's own display
+				 * index; until then valid_from == frame, which idx_push set. */
+				if (pi.is_idr || (recovery_seen && pi.is_intra))
+					idx_push(s, au_start, frames);
+			} else if (type == 5) {
 				idx_push(s, au_start, frames);
+			}
 			frames++;
 			in_vcl = 1;
+			recovery_seen = 0; /* consumed by this picture */
 		} else if (is_vcl) {
 			in_vcl = 1;
 		}
-		const uint8_t *sc = edge264_find_start_code(p, end, 0);
 		p = (sc < end) ? sc + 3 : end;
 	}
-	s->num_pics = frames;
-	s->info.is_mvc = is_mvc;
+	if (use_poc)
+		rc = flush_cvs(s, &pb, cvs_base, cvs_first_sp); /* the last sequence ends at EOF */
+out:
+	free(pb.v);
+	free(pc);
+	if (rc == 0) {
+		s->num_pics = frames;
+		s->info.is_mvc = is_mvc;
+	}
+	return rc;
+}
+
+static void scan_index(MvcSource *s) {
+	if (scan_index_pass(s, 1) == 0)
+		return;
+	/* The stream is outside the POC derivation's scope (field coding, an unknown
+	 * parameter set, an MMCO5 POC reset - see h264poc.h), so an open-GOP recovery
+	 * point's display index cannot be established and it must not become a seek
+	 * point. Rerun recording IDRs only: decode order and display order agree there,
+	 * so no POC is needed. Seeks then re-decode from the preceding IDR, which is the
+	 * behaviour that shipped before recovery-point seeking - slower on a long GOP,
+	 * never wrong. The partial first pass is discarded wholesale so nothing it
+	 * derived can leak into the fallback. */
+	s->nidx = 0;
+	s->nps = 0;
+	s->num_pics = 0;
+	s->info.is_mvc = 0;
+	scan_index_pass(s, 0);
 }
 
 /* --- edge264 caller loop -------------------------------------------------- */
@@ -471,12 +636,18 @@ static void refeed_param_sets(MvcSource *s, const uint8_t *sp_nal) {
  * allocation rather than decode against a NULL decoder. */
 static int seek_to(MvcSource *s, int target) {
 	int lo = 0, hi = s->nidx, best = -1;
-	while (lo < hi) { /* largest seek point with frame <= target */
+	/* Largest seek point that can actually serve `target`: the search keys on
+	 * valid_from, not frame, because a recovery point does not yield correct output
+	 * for the display indices its leading pictures occupy (see SeekPoint). Keying on
+	 * frame would pick a recovery point for a target inside that range and serve a
+	 * leading picture decoded without its references. */
+	while (lo < hi) {
 		int mid = (lo + hi) / 2;
-		if (s->idx[mid].frame <= target) { best = mid; lo = mid + 1; }
+		if (s->idx[mid].valid_from <= target) { best = mid; lo = mid + 1; }
 		else hi = mid;
 	}
 	int sp_frame = best >= 0 ? s->idx[best].frame : 0;
+	int sp_valid = best >= 0 ? s->idx[best].valid_from : 0;
 	const uint8_t *sp_nal = best >= 0 ? s->idx[best].nal : s->start;
 	/* Restart if we must go backwards, a closer seek point lies ahead, or the
 	 * decoder is absent - a prior seek's reset_decoder may have freed it and then
@@ -490,6 +661,7 @@ static int seek_to(MvcSource *s, int target) {
 		refeed_param_sets(s, sp_nal);
 		s->nal = sp_nal;
 		s->next_out = sp_frame;
+		s->valid_from = sp_valid;
 	}
 	return 0;
 }
@@ -694,6 +866,7 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
 	if (!s->dec) { set_err(err, errsize, "edge264_alloc failed"); mvc_close(s); return NULL; }
 	s->nal = s->start;
 	s->next_out = 0;
+	s->valid_from = 0; /* a decode from the stream's start has no leading pictures to discard */
 	s->last_poc = INT64_MIN;
 	Edge264Frame f;
 	int rc = decode_next_output(s, &f, err, errsize);
@@ -743,6 +916,14 @@ static int ensure_source_frame(MvcSource *s, int src_n, char *err, size_t errsiz
 			return -1;
 		}
 		int idx = s->next_out++;
+		/* Discard the leading pictures of the recovery point this run started at:
+		 * they come out first (they precede it in display order) but reference the
+		 * previous GOP, which a cold decode never saw, so they are wrong. They must
+		 * be decoded - the decoder emits them and the ones after depend on the DPB
+		 * state they leave - but never cached or served. seek_to guarantees the
+		 * target is at or after valid_from, so this never skips the frame we want. */
+		if (idx < s->valid_from)
+			continue;
 		/* cache frames in the window just before the target - exactly what a
 		 * backward / Reverse pass asks for next; the target itself is always in
 		 * the window (ring_cap >= 2). On OOM caching the target, fall back to the
