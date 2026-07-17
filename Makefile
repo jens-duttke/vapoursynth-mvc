@@ -32,7 +32,7 @@ AVS_DLL   := libavsmvc.dll
 VS_DLL    := libvsmvc.dll
 
 .PHONY: all clean check check-bitexact check-avs
-all: coretest mockhost seektest enomemtest allocfailtest poctest stalltest cachetest budgettest avsnulltest $(PLUGIN) $(AVS_PLUGIN)
+all: coretest mockhost seektest enomemtest allocfailtest poctest h264poctest stalltest cachetest budgettest avsnulltest $(PLUGIN) $(AVS_PLUGIN)
 
 # edge264 as a self-contained static library. FORCE so the sub-make always runs
 # and decides up-to-dateness itself: a bare file target with no prerequisites is
@@ -151,6 +151,12 @@ poctest: tests/poctest.c src/mvcsource.c src/mvcsource.h $(EDGE264_A)
 	$(CC) $(CFLAGS) $(INCLUDES) -Wl,--wrap=edge264_get_frame \
 	    tests/poctest.c src/mvcsource.c $(EDGE264_A) -pthread -o $@
 
+# POC parser unit test. src/h264poc.h compiles standalone (like cache_budget.h),
+# so this needs neither a bitstream nor edge264 - it drives the parser from
+# hand-written bits.
+h264poctest: tests/h264poctest.c src/h264poc.h
+	$(CC) $(CFLAGS) -Isrc tests/h264poctest.c -o $@
+
 # ENOBUFS-stall test: --wrap intercepts both edge264 entry points to hold the
 # decoder in a persistent-ENOBUFS / no-frame state (a DPB stuck full of incomplete
 # pictures), checking the caller loop's progress guard fails loudly instead of
@@ -181,7 +187,7 @@ avsnulltest: tests/avsnulltest.c src/avisynth_plugin.c src/mvcsource.c src/mvcso
 budgettest: tests/budgettest.c src/cache_budget.h
 	$(CC) $(CFLAGS) $(INCLUDES) tests/budgettest.c -o $@
 
-check: coretest mockhost mockhost-asan seektest enomemtest allocfailtest poctest stalltest cachetest budgettest avsnulltest $(PLUGIN) $(AVS_PLUGIN)
+check: coretest mockhost mockhost-asan seektest enomemtest allocfailtest poctest h264poctest stalltest cachetest budgettest avsnulltest $(PLUGIN) $(AVS_PLUGIN)
 	@echo "== makefile behaviour (edge264 sub-make always delegated) =="
 	sh tests/mkcheck.sh "$(EDGE264_SRC)"
 	@echo "== seek regression (headerless-GOP / AUD-headed / open-GOP, committed fixtures) =="
@@ -192,6 +198,8 @@ check: coretest mockhost mockhost-asan seektest enomemtest allocfailtest poctest
 	./allocfailtest tests/fixtures/base_multigop.264
 	@echo "== display-order tripwire (injected via --wrap) =="
 	./poctest tests/fixtures/base_multigop.264
+	@echo "== POC parser unit test (hand-written bits, no bitstream) =="
+	./h264poctest
 	@echo "== ENOBUFS-stall progress guard (injected via --wrap) =="
 	./stalltest tests/fixtures/base_multigop.264
 	@echo "== on-disk index cache (miss/hit + corrupt/stale, committed fixture) =="
@@ -267,5 +275,5 @@ endif
 	  [ "$$a" = "$$b" ] && echo "bit-exact vs edge264: OK" || { echo "MISMATCH"; exit 1; }
 
 clean:
-	rm -f coretest mockhost mockhost-asan seektest enomemtest allocfailtest poctest stalltest cachetest budgettest budgettest32 avsnulltest avshost \
+	rm -f coretest mockhost mockhost-asan seektest enomemtest allocfailtest poctest h264poctest stalltest cachetest budgettest budgettest32 avsnulltest avshost \
 	    $(PLUGIN) $(AVS_PLUGIN) $(AVS_DLL) $(VS_DLL) *.exe src/*.o
