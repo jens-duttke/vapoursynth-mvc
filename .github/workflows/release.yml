@@ -51,13 +51,20 @@ jobs:
       - name: Verify the Linux plugins carry no AVX-512 (portable ISA floor)
         # Guard against a reintroduced native build: a distributed .so must contain
         # no AVX-512 (EVEX-prefixed) instructions, or it SIGILLs on any CPU without
-        # AVX-512. In 64-bit code the opcode byte 0x62 is exclusively the EVEX
-        # prefix, so a disassembly line whose first instruction byte is 62 is an
-        # AVX-512 instruction. (Anchored to instruction-start lines - "addr:\t62 " -
-        # so a wrapped byte-continuation line cannot false-positive.)
+        # AVX-512. In 64-bit code the opcode byte 0x62 is the EVEX prefix - but 0x62
+        # also occurs as the first byte of relocated pointer DATA that objdump's
+        # linear sweep frames inside .text (e.g. the function-pointer setup in
+        # edge264_alloc) as a bare, undecodable "addr:\t62 xx xx xx" line with NO
+        # mnemonic - too short to be a valid EVEX op, and objdump resyncs on the
+        # next real instruction (confirmed data, not code, on binutils 2.42). A real
+        # AVX-512 instruction always disassembles to a mnemonic; these artifacts
+        # never do. So count only 0x62 lines objdump actually decoded into an
+        # instruction (bytes, then a tab, then a mnemonic) - real EVEX is caught, the
+        # data artifacts are not. (A plain "grep 62 " false-positived the v0.5.0
+        # build on such artifacts.)
         run: |
           for so in libvsmvc.so libavsmvc.so; do
-            n=$(objdump -d "$so" | grep -cP '^\s+[0-9a-f]+:\t62 ' || true)
+            n=$(objdump -d "$so" | grep -cP '^\s+[0-9a-f]+:\t62 [0-9a-f ]*\t\S' || true)
             echo "$so: $n AVX-512 (EVEX) instruction(s)"
             test "$n" = 0
           done
