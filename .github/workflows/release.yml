@@ -38,6 +38,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-tags: true      # gh release --notes-from-tag needs the annotated
+          fetch-depth: 0        # tag's message; a shallow checkout omits it and
+                                # the notes silently fall back to the commit message
       - name: Install MinGW-w64
         run: |
           sudo apt-get update
@@ -60,7 +64,7 @@ jobs:
         # AVX-512 instruction always disassembles to a mnemonic; these artifacts
         # never do. So count only 0x62 lines objdump actually decoded into an
         # instruction (bytes, then a tab, then a mnemonic) - real EVEX is caught, the
-        # data artifacts are not. (A plain "grep 62 " false-positived the v0.5.0
+        # data artifacts are not. (A plain "grep 62 " false-positived a release
         # build on such artifacts.)
         run: |
           for so in libvsmvc.so libavsmvc.so; do
