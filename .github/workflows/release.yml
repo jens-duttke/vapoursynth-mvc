@@ -19,7 +19,7 @@ permissions:
 env:
   # edge264-mvc release the binaries are built against. Keep in sync with
   # tests.yml's EDGE264_REF; bump both to the matching edge264-mvc tag.
-  EDGE264_REF: v2026.07.13
+  EDGE264_REF: v2026.07.18
   # Portable ISA for the DISTRIBUTED Linux .so builds. edge264's native build
   # injects -march=native, which bakes in whatever ISA the CI runner happens to
   # have; a runner with AVX-512 once produced a .so that crashed with SIGILL on
