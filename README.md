@@ -87,9 +87,14 @@ both hosts** (correct frame count, dimensions, frame-accurate seeking).
   was demuxed into two separate elementary streams (base `.264` + dependent
   `.mvc`, as tsMuxeR / BD3D2MK3D produce) via the `dependent` argument, without an
   on-disk remux. The two memory-mapped streams are interleaved per access unit
-  into the combined MVC stream the decoder expects; the seek index uses the base
-  view's IDRs. Bit-exact against the single-file (combined) decode of the same
-  stream across the JVT MVC conformance corpus, all layouts (`tests/twofiletest.c`).
+  into the combined MVC stream the decoder expects, and the interleave is cached
+  in a sidecar next to the dependent stream so a reopen skips the full scan of
+  both files. Seek points land on every random-access point - IDRs *and* open-GOP
+  recovery points, exactly as for a combined stream: the POC derivation behind
+  recovery-point seeking is a base-view quantity, so it runs on the base stream's
+  slice headers alone (with the same IDR-only fallback for streams it cannot
+  model). Bit-exact against the single-file (combined) decode of the same stream
+  on a real tsMuxeR demux, all layouts, including cold seeks (`tests/twofiletest.c`).
 - [ ] VUI frame-rate auto-detection.
 
 ## Usage

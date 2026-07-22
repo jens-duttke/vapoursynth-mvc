@@ -136,7 +136,7 @@ static int test_cache(const char *base, const char *dep) {
 	/* a corrupt sidecar must be rejected (rebuilt), never trusted */
 	if (!rc) {
 		FILE *w = fopen(cpath, "wb");
-		if (w) { fwrite("MVC2FI01\xff\xff\xff\xff garbage", 1, 24, w); fclose(w); }
+		if (w) { fwrite("MVC2FI02\xff\xff\xff\xff garbage", 1, 24, w); fclose(w); }
 		MvcSource *s3 = mvc_open2(base, dep, 0, MVC_ALT, 0, 0, 0, 0, err, sizeof err);
 		if (!s3) { printf("FAIL[cache]: open over a corrupt sidecar failed: %s\n", err); rc = -1; }
 		else {
@@ -150,6 +150,47 @@ static int test_cache(const char *base, const char *dep) {
 
 	remove(cpath);
 	free(aY); free(aU); free(aV); free(bY); free(bU); free(bV);
+	return rc;
+}
+
+/* Cold seeks: open a FRESH two-file source per target frame and require its
+ * output byte-identical to the combined decode of the same frame. A fresh open
+ * defeats the decoded-frame cache, so every target goes through seek_to and a
+ * forward re-decode from the chosen seek point - on a stream with open-GOP
+ * recovery points that exercises the two-file recovery-point seek points
+ * (including the leading-picture discard, see SeekPoint.valid_from), and after
+ * the first open it also exercises seek points loaded back from the sidecar. */
+static int test_cold_seeks(const char *combined, const char *base, const char *dep) {
+	char err[256] = "";
+	MvcSource *sc = mvc_open(combined, 0, MVC_TAB, 0, 0, 0, 0, err, sizeof err);
+	if (!sc) { printf("FAIL[cold]: combined open failed: %s\n", err); return -1; }
+	const MvcInfo *in = mvc_info(sc);
+	int N = in->num_frames, W = in->width, H = in->height, CW = W / 2, CH = H / 2;
+	size_t ysz = (size_t)W * H, csz = (size_t)CW * CH;
+	uint8_t *cY = malloc(ysz), *cU = malloc(csz), *cV = malloc(csz);
+	uint8_t *tY = malloc(ysz), *tU = malloc(csz), *tV = malloc(csz);
+	int rc = 0, checked = 0;
+	if (!cY || !cU || !cV || !tY || !tU || !tV) { printf("FAIL[cold]: oom\n"); rc = -1; goto done; }
+	/* last frame first: the farthest cold target from the mandatory frame-0 decode */
+	int targets[] = { N - 1, 0, (2 * N) / 3, 1, N / 2, N - 2 };
+	for (unsigned k = 0; k < sizeof targets / sizeof targets[0] && !rc; k++) {
+		int t = targets[k];
+		if (t < 0 || t >= N) continue;
+		if (get(sc, t, cY, cU, cV, W, CW)) { rc = -1; break; }
+		MvcSource *st = mvc_open2(base, dep, 0, MVC_TAB, 0, 0, 0, 0, err, sizeof err);
+		if (!st) { printf("FAIL[cold]: two-file open failed: %s\n", err); rc = -1; break; }
+		if (get(st, t, tY, tU, tV, W, CW)) rc = -1;
+		else if (memcmp(cY, tY, ysz) || memcmp(cU, tU, csz) || memcmp(cV, tV, csz)) {
+			printf("FAIL[cold]: frame %d differs from the combined decode\n", t);
+			rc = -1;
+		} else checked++;
+		mvc_close(st);
+	}
+	if (!rc)
+		printf("ok[cold]: %d cold-open seeks bit-exact to the combined decode\n", checked);
+done:
+	free(cY); free(cU); free(cV); free(tY); free(tU); free(tV);
+	mvc_close(sc);
 	return rc;
 }
 
@@ -187,6 +228,7 @@ int main(int argc, char **argv) {
 	for (MvcLayout lay = MVC_BASE; lay <= MVC_ALT; lay++)
 		rc |= compare_layout(combined, base, dep, lay);
 
+	rc |= test_cold_seeks(combined, base, dep);
 	rc |= test_cache(base, dep);
 
 	printf(rc ? "RESULT: FAIL\n" : "RESULT: PASS (mvc_open2 bit-exact to the combined decode on a real demux)\n");

@@ -368,7 +368,7 @@ static void save_index_cache(const MvcSource *s, const char *cpath, uint64_t src
  * the pairing and is never opened single-file, so it cannot collide with a
  * single-file `<base>.mvcidx`.
  */
-#define MVCIDX2_MAGIC "MVC2FI01" /* bump the trailing digits to invalidate old two-file caches */
+#define MVCIDX2_MAGIC "MVC2FI02" /* bump the trailing digits to invalidate old two-file caches (02: seek points now include open-GOP recovery points; an 01 sidecar is still correct but IDR-only, and keeping it would silently withhold the faster seeking) */
 
 struct idx_hdr2 {
 	char     magic[8];    /* MVCIDX2_MAGIC, no NUL */
@@ -1161,30 +1161,56 @@ static int collect_view_nals(const uint8_t *map, size_t map_size, int is_base,
  * carries. Verified bit-exact against that combined decode (tests/twofiletest.c).
  *
  * The scan is folded into this single pass: it counts base pictures, records the
- * IDR seek points (span index of each IDR's access-unit start), collects the
- * parameter sets from both views in interleaved order, and detects the dependent
- * view. IDR-only seek points - see mvc_open2. Returns 0, or -1 (message in err).
+ * seek points, collects the parameter sets from both views in interleaved order,
+ * and detects the dependent view.
+ *
+ * With use_poc, seek points land on every random-access point - an IDR, or an
+ * open-GOP recovery point - exactly as in the single-file scan (scan_index_pass):
+ * the base-view slice headers are parsed for their picture order count so a
+ * recovery point's display index (valid_from) can be derived. Everything the POC
+ * derivation needs is a base-view quantity, so only base-file NALs feed it: the
+ * base SPS/PPS (a demuxed base stream must be 2D-playable, so the sets its slices
+ * reference are in this file - the dependent file's PPSes belong to the subset
+ * SPS and are never referenced by a base slice) and the base SEIs (a real demux
+ * routes the recovery_point SEI to the base file; the dependent file's per-view
+ * SEIs do not mark base random access). Returns 1 if the stream defeats the POC
+ * derivation (field coding, an MMCO5 reset, an unknown parameter set - see
+ * h264poc.h), so the caller can rebuild without it; without use_poc only IDRs
+ * become seek points, where decode and display order agree and no POC is needed.
+ * Returns 0 on success, -1 on a hard error (message in err).
  */
-static int build_interleaved(MvcSource *s, char *err, size_t errsize) {
+static int build_interleaved_pass(MvcSource *s, int use_poc, char *err, size_t errsize) {
+	PocBuf pb = {0};
+	H264PocCtx *pc = NULL;
+	if (use_poc) {
+		pc = malloc(sizeof *pc); /* ~35 KB: too big for a frameserver worker's stack */
+		if (!pc)
+			return 1; /* treat like a defeated derivation: IDR-only is still correct */
+		h264_poc_ctx_init(pc);
+	}
 	ViewNal *bn = NULL, *dn = NULL;
 	int nb = 0, nd = 0, nab = 0, nad = 0;
 	if (collect_view_nals(s->map, s->map_size, 1, &bn, &nb, &nab) < 0) {
 		set_err(err, errsize, "base stream has no decodable NAL units");
+		free(pc);
 		return -1;
 	}
 	if (collect_view_nals(s->map2, s->map2_size, 0, &dn, &nd, &nad) < 0) {
 		set_err(err, errsize, "dependent stream has no decodable NAL units");
-		free(bn);
+		free(bn); free(pc);
 		return -1;
 	}
 	s->spans = malloc((size_t)(nb + nd) * sizeof *s->spans);
-	if (!s->spans) { set_err(err, errsize, "out of memory"); free(bn); free(dn); return -1; }
+	if (!s->spans) { set_err(err, errsize, "out of memory"); free(bn); free(dn); free(pc); return -1; }
 
 	int n_au = nab > nad ? nab : nad;
 	int bi = 0, di = 0, si = 0;
 	int frames = 0, is_mvc = 0, seen_sps = 0, seen_pps = 0;
+	int recovery_seen = 0;              /* a recovery_point SEI is pending for the next picture */
+	int cvs_base = 0, cvs_first_sp = 0; /* start of the coded video sequence being scanned */
+	int rc = 0;
 	for (int au = 0; au < n_au; au++) {
-		int au_start_si = si, is_idr = 0, has_pic = 0;
+		int au_start_si = si;
 		for (; bi < nb && bn[bi].au == au; bi++, si++) {
 			int type = bn[bi].type;
 			s->spans[si].start = bn[bi].start;
@@ -1197,10 +1223,42 @@ static int build_interleaved(MvcSource *s, char *err, size_t errsize) {
 				if (s->nps > before) s->ps[s->nps - 1].nal_i = si; /* guard: ps_push no-ops on OOM */
 			}
 			if (type == 15) is_mvc = 1;
+			if (use_poc) {
+				if (type == 7)
+					h264_parse_sps(pc, bn[bi].start, bn[bi].end);
+				else if (type == 8)
+					h264_parse_pps(pc, bn[bi].start, bn[bi].end);
+				else if (type == 6 && h264_sei_is_recovery_point(bn[bi].start, bn[bi].end))
+					recovery_seen = 1;
+			}
 			if ((type == 1 || type == 5) && seen_sps && seen_pps &&
-			    nal_is_pic_start(bn[bi].start, bn[bi].end, type, 1)) {
-				has_pic = 1;
-				if (type == 5) is_idr = 1;
+			    nal_is_pic_start(bn[bi].start, bn[bi].end, type, 1)) { /* counted base picture */
+				if (use_poc) {
+					H264PicInfo pi;
+					if (!h264_parse_picture(pc, bn[bi].start, bn[bi].end, &pi)) { rc = 1; goto out; }
+					if (pi.is_idr) { /* an IDR ends the previous sequence and starts a new one */
+						if (flush_cvs(s, &pb, cvs_base, cvs_first_sp) < 0) { rc = 1; goto out; }
+						pb.n = 0;
+						cvs_base = frames;
+						cvs_first_sp = s->nidx;
+						h264_poc_reset(pc);
+					}
+					if (pocbuf_push(&pb, pi.poc) < 0) { rc = 1; goto out; }
+					/* Every random-access point becomes a seek point; flush_cvs fills
+					 * in a recovery point's display index (valid_from) once its
+					 * sequence's picture order counts are known. */
+					if (pi.is_idr || (recovery_seen && pi.is_intra)) {
+						int before = s->nidx;
+						idx_push(s, s->spans[au_start_si].start, frames);
+						if (s->nidx > before) s->idx[s->nidx - 1].nal_i = au_start_si; /* guard: idx_push no-ops on OOM */
+					}
+				} else if (type == 5) {
+					int before = s->nidx;
+					idx_push(s, s->spans[au_start_si].start, frames);
+					if (s->nidx > before) s->idx[s->nidx - 1].nal_i = au_start_si; /* guard: idx_push no-ops on OOM */
+				}
+				frames++;
+				recovery_seen = 0; /* consumed by this picture */
 			}
 		}
 		for (; di < nd && dn[di].au == au; di++, si++) {
@@ -1214,22 +1272,40 @@ static int build_interleaved(MvcSource *s, char *err, size_t errsize) {
 			}
 			if (type == 20 || type == 15) is_mvc = 1;
 		}
-		if (has_pic) {
-			if (is_idr) {
-				int before = s->nidx;
-				idx_push(s, s->spans[au_start_si].start, frames);
-				if (s->nidx > before) s->idx[s->nidx - 1].nal_i = au_start_si; /* guard: idx_push no-ops on OOM */
-			}
-			frames++;
-		}
 	}
-	s->nspans = si;
+	if (use_poc)
+		rc = flush_cvs(s, &pb, cvs_base, cvs_first_sp) < 0; /* the last sequence ends at EOF */
+out:
+	free(pb.v);
+	free(pc);
 	free(bn);
 	free(dn);
+	if (rc)
+		return rc;
+	s->nspans = si;
 	if (frames <= 0) { set_err(err, errsize, "no decodable frames found in the base stream"); return -1; }
 	s->num_pics = frames;
 	s->info.is_mvc = is_mvc;
 	return 0;
+}
+
+/* Interleave with recovery-point seek points; if the stream defeats the POC
+ * derivation, rebuild IDR-only - the same fallback scan_index takes, slower on a
+ * long GOP but never wrong. The partial first pass is discarded wholesale so
+ * nothing it derived can leak into the fallback. */
+static int build_interleaved(MvcSource *s, char *err, size_t errsize) {
+	int rc = build_interleaved_pass(s, 1, err, errsize);
+	if (rc <= 0)
+		return rc;
+	free(s->spans);
+	s->spans = NULL;
+	s->nspans = 0;
+	s->nidx = 0;
+	s->nps = 0;
+	s->num_pics = 0;
+	s->info.is_mvc = 0;
+	rc = build_interleaved_pass(s, 0, err, errsize);
+	return rc > 0 ? -1 : rc; /* the no-POC pass never asks for a fallback; fail hard if it does */
 }
 
 /* --- public API ----------------------------------------------------------- */

@@ -69,11 +69,13 @@ MvcSource *mvc_open(const char *path, int n_threads, MvcLayout layout, int swapl
  * that call. Both files are memory-mapped, so the combine costs only a NAL-span
  * index, not a copy of the (multi-GB) streams.
  *
- * The two-file path indexes IDR seek points only (open-GOP recovery points need
- * per-view picture-order-count derivation not modelled across two streams):
- * correct everywhere, and optimal for the near-sequential access this feeds
- * (decode-and-re-encode); a backward seek re-decodes from the preceding IDR.
- * The on-disk index cache is single-file only and is skipped here.
+ * Seek points land on every random-access point - an IDR, or an open-GOP
+ * recovery point - exactly as for a single combined stream: the POC derivation
+ * behind recovery-point seeking is a base-view quantity, so it runs on the
+ * base stream's slice headers alone. A stream it cannot model falls back to
+ * IDR-only seek points (slower on a long GOP, never wrong). The interleave +
+ * seek index is cached in a sidecar next to the dependent stream
+ * (`<dep>.mvcidx`), so a reopen skips the full scan of both files.
  */
 MvcSource *mvc_open2(const char *base_path, const char *dep_path, int n_threads,
 	MvcLayout layout, int swaplr, int64_t fps_num, int64_t fps_den,
